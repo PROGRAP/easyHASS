@@ -1,6 +1,6 @@
 # Easy-Hass installieren
 
-**Version 0.2.0-alpha.1 · Stand 25. Oktober 2026**
+**Version 0.2.0-alpha.2 · Stand 25. Oktober 2026**
 
 **Alpha / Vorabversion:** Diese Ausgabe ist für frühe Tests gedacht und kann
 Fehler oder noch unvollständiges Verhalten enthalten. Vor der Installation
@@ -33,7 +33,7 @@ in den HACS-Standardkatalog wird damit nicht vorausgesetzt.
    **Herunterladen** wählen. Bei einem bereits geladenen Repository über das
    Drei-Punkte-Menü **Erneut herunterladen / Redownload** öffnen.
 5. Im Download-Dialog **Andere Version benötigt? / Need a different version?**
-   öffnen und die Vorabversion **v0.2.0-alpha.1** auswählen. Die Auswahl setzt
+   öffnen und die Vorabversion **v0.2.0-alpha.2** auswählen. Die Auswahl setzt
    voraus, dass dieser GitHub-Prerelease veröffentlicht wurde.
 6. Mit dem Neustart und der Aktivierung in den folgenden Abschnitten fortfahren.
 
@@ -59,7 +59,7 @@ benötigt. Eine npm-Installation ist für diesen Schritt nicht erforderlich.
 npm run package
 ```
 
-Das erzeugt `dist/easy-hass-0.2.0-alpha.1.zip`. Dieses ZIP direkt im
+Das erzeugt `dist/easy-hass-0.2.0-alpha.2.zip`. Dieses ZIP direkt im
 HA-Konfigurationsverzeichnis entpacken. Alternativ den vollständigen Ordner
 `custom_components/easy_hass/` dorthin kopieren. Die Struktur muss so aussehen:
 

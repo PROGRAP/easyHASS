@@ -5,9 +5,9 @@
   "config_flow": true,
   "dependencies": ["frontend", "http", "panel_custom"],
   "documentation": "https://github.com/prograp/easyHASS",
-  "integration_type": "system",
+  "integration_type": "service",
   "issue_tracker": "https://github.com/prograp/easyHASS/issues",
   "requirements": [],
   "single_config_entry": true,
-  "version": "0.2.0-alpha.1"
+  "version": "0.2.0-alpha.2"
 }

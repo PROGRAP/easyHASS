@@ -2,7 +2,7 @@
 
 DOMAIN = "easy_hass"
 NAME = "Easy-Hass"
-VERSION = "0.2.0-alpha.1"
+VERSION = "0.2.0-alpha.2"
 PANEL_PATH = "easy-hass"
 PANEL_ELEMENT = "easy-hass-panel"
 PANEL_ICON = "mdi:home-heart"
