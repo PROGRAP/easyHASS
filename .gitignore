@@ -1,0 +1,21 @@
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+test-results/
+dist/
+.ha-test/
+.local-ha/
+.env
+.env.*
+!.env.example
+
+# Local design work and captures are not part of the public integration.
+docs/*
+!docs/INSTALLATION.md
+!docs/LOCAL_HA.md
+!docs/HA-MODEL.md
+scripts/capture-figcraft.mjs
+scripts/figcraft-svg.mjs

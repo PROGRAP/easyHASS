@@ -1,0 +1,11 @@
+"""Constants for Easy-Hass."""
+
+DOMAIN = "easy_hass"
+NAME = "Easy-Hass"
+VERSION = "0.2.0-alpha.1"
+PANEL_PATH = "easy-hass"
+PANEL_ELEMENT = "easy-hass-panel"
+PANEL_ICON = "mdi:home-heart"
+STATIC_URL = "/easy_hass_static"
+MODULE_FILE = "easy-hass.js"
+BUILD_METADATA_FILE = "build.json"

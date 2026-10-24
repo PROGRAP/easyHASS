@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Easy-Hass · Entwicklungsvorschau</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --primary-color: #326e59;
+        --primary-text-color: #25352f;
+        --secondary-text-color: #66726c;
+        --primary-background-color: #f5f6f2;
+        --card-background-color: #fff;
+        --divider-color: #e5e8e2;
+        --ha-sidebar-width: 256px;
+      }
+      body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+      .preview-label { position: fixed; z-index: 100; left: 50%; bottom: 0; transform: translateX(-50%); padding: 3px 10px; color: #66726c; background: #f5f6f2; border: 1px solid #e5e8e2; border-radius: 6px 6px 0 0; font-size: 10px; white-space: nowrap; pointer-events: none; }
+      @media (prefers-color-scheme: dark) {
+        :root { color-scheme: dark; --primary-color: #89baa4; --primary-text-color: #e2ece6; --secondary-text-color: #acb9b0; --primary-background-color: #18221c; --card-background-color: #202d25; --divider-color: #35483a; }
+      }
+    </style>
+  </head>
+  <body>
+    <home-assistant></home-assistant>
+    <div class="preview-label">Entwicklungsvorschau · keine Home-Assistant-Verbindung</div>
+    <script type="module">
+      const build = await fetch('/easy_hass_static/build.json', { cache: 'no-store' }).then(response => response.json());
+      await import(`/easy_hass_static/${build.entry}`);
+
+      // A local shell fixture. This deliberately does not pretend to be a live HA session.
+      customElements.define('ha-drawer', class extends HTMLElement {
+        constructor() {
+          super();
+          this.attachShadow({ mode: 'open' });
+          this._media = matchMedia('(max-width: 870px)');
+          this._resize = () => this.render();
+          this._open = false;
+        }
+        connectedCallback() {
+          this.render();
+          this._media.addEventListener('change', this._resize);
+        }
+        disconnectedCallback() { this._media.removeEventListener('change', this._resize); }
+        get open() { return this._open; }
+        set open(value) {
+          this._open = Boolean(value);
+          const modal = this.shadowRoot.querySelector('wa-drawer');
+          if (modal) {
+            modal.open = this._open;
+            modal.toggleAttribute('open', this._open);
+          }
+        }
+        render(type = this._media.matches ? 'modal' : '') {
+          this.type = type;
+          if (this.type) this.setAttribute('type', this.type);
+          else this.removeAttribute('type');
+          this.shadowRoot.innerHTML = `
+            <style>
+              :host { display: block; min-height: 100vh; }
+              .layout { display: flex; min-height: 100vh; }
+              .sidebar-shell { position: fixed; inset: 0 auto 0 0; width: var(--ha-sidebar-width); }
+              .app-content { box-sizing: border-box; min-width: 0; flex: 1; padding-inline-start: var(--ha-sidebar-width); }
+              wa-drawer { display: none; }
+              wa-drawer[open] { display: block; position: fixed; z-index: 10; inset: 0 auto 0 0; width: 256px; }
+            </style>
+            ${this.type === 'modal'
+              ? '<slot name="appContent"></slot><wa-drawer><slot></slot></wa-drawer>'
+              : '<div class="layout"><div class="sidebar-shell"><slot></slot></div><div class="app-content"><slot name="appContent"></slot></div></div>'}`;
+          this.open = this._open;
+        }
+      });
+      customElements.define('ha-sidebar', class extends HTMLElement {
+        constructor() {
+          super();
+          this.attachShadow({ mode: 'open' }).innerHTML = `
+            <style>:host { display: block; min-height: 100vh; box-sizing: border-box; padding: 24px; background: var(--card-background-color); border-right: 1px solid var(--divider-color); color: var(--primary-text-color); } strong { display: block; margin-bottom: 32px; } a { display: block; padding: 12px 0; color: inherit; }</style>
+            <strong>Home Assistant</strong>
+            <a href="/lovelace">Übersicht</a>
+            <a href="/easy-hass">Easy-Hass</a>
+            <a href="/config">Einstellungen</a>`;
+        }
+      });
+      customElements.define('home-assistant-main', class extends HTMLElement {
+        constructor() {
+          super();
+          this.attachShadow({ mode: 'open' }).innerHTML = `
+            <style>:host { display: block; } partial-panel-resolver { display: block; min-width: 0; }</style>
+            <ha-drawer><ha-sidebar></ha-sidebar><partial-panel-resolver slot="appContent"></partial-panel-resolver></ha-drawer>`;
+          this.addEventListener('hass-toggle-menu', (event) => {
+            const drawer = this.shadowRoot.querySelector('ha-drawer');
+            drawer.open = event.detail?.open ?? !drawer.open;
+          });
+        }
+      });
+      customElements.define('home-assistant', class extends HTMLElement {
+        constructor() {
+          super();
+          this.attachShadow({ mode: 'open' }).innerHTML = '<home-assistant-main></home-assistant-main>';
+        }
+      });
+
+      const main = document.querySelector('home-assistant').shadowRoot.querySelector('home-assistant-main');
+      const resolver = main.shadowRoot.querySelector('partial-panel-resolver');
+      const drawer = resolver.parentElement;
+      window.easyHassPreview = { resolver, drawer, main, sidebar: drawer.querySelector('ha-sidebar') };
+      if (location.pathname === '/easy-hass' || location.pathname.startsWith('/easy-hass/')) {
+        const panel = document.createElement('easy-hass-panel');
+        panel.panel = { url_path: 'easy-hass', component_name: 'custom', config: {} };
+        panel.route = { prefix: '/easy-hass', path: '' };
+        panel.hass = { connected: false, user: { is_admin: true }, panels: { lovelace: { component_name: 'lovelace' }, config: { component_name: 'config', require_admin: true } } };
+        resolver.append(panel);
+        window.easyHassPreview.panel = panel;
+      } else {
+        resolver.innerHTML = '<main style="padding:40px;color:var(--primary-text-color)"><h1>Home-Assistant-Ansicht · Vorschau</h1><p>Die originale Navigation ist wieder sichtbar.</p><a href="/easy-hass" style="color:var(--primary-color)">Zurück zu Easy-Hass</a></main>';
+      }
+    </script>
+  </body>
+</html>

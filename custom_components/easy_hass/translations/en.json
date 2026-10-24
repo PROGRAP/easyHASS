@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Easy-Hass",
+        "description": "Add the Easy-Hass Hello World page to your Home Assistant sidebar."
+      }
+    },
+    "abort": {
+      "already_configured": "Easy-Hass is already configured.",
+      "single_instance_allowed": "Only one Easy-Hass instance can be configured."
+    }
+  },
+  "exceptions": {
+    "panel_path_in_use": {
+      "message": "The panel path /{path} is already in use. Remove the conflicting panel configuration and reload Easy-Hass."
+    },
+    "frontend_missing": {
+      "message": "The Easy-Hass frontend is missing. Copy the complete easy_hass integration folder, including its frontend directory, and reload the integration."
+    }
+  }
+}

@@ -1,0 +1,3 @@
+# Isolated test environment only; never installed by the integration itself.
+# Tests use the Python standard-library unittest runner and real HA classes.
+homeassistant==2026.10.2

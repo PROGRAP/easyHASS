@@ -1,0 +1,29 @@
+{
+  "name": "easy-hass",
+  "version": "0.2.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "description": "Minimal Home Assistant room controls based on the FigCraft design",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/dev-server.mjs",
+    "package": "npm run build && python3 scripts/package.py",
+    "check": "node --check frontend/src/easy-hass.js && node --check frontend/src/room-detail.js && node --check frontend/src/room-photo.js && node --check frontend/src/image-palette.js && node --check frontend/src/room-motion.js && node --check frontend/src/control-morph.js && node --check frontend/src/ha-model.js && node --check frontend/src/dom.js && node --check frontend/src/icons.js && node --check frontend/src/compatibility/navigation.js && node scripts/build.mjs --check",
+    "test": "node --test tests/ha-model.test.mjs tests/image-palette.test.mjs",
+    "test:dom": "node --test tests/dom.test.mjs",
+    "test:build": "node --test tests/build.test.mjs",
+    "test:ha": "node scripts/ha-smoke.mjs",
+    "test:browser": "node scripts/browser-smoke.mjs",
+    "test:motion": "node scripts/browser-morph.mjs",
+    "test:rooms": "node scripts/browser-room-detail.mjs",
+    "test:room-motion": "node scripts/browser-room-motion.mjs",
+    "test:image-palette": "node scripts/browser-image-palette.mjs",
+    "test:cache": "node scripts/browser-cache.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1"
+  }
+}

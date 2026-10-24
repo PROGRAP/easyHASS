@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Easy-Hass",
+        "description": "Fügt die Hello-World-Seite von Easy-Hass zur Seitenleiste von Home Assistant hinzu."
+      }
+    },
+    "abort": {
+      "already_configured": "Easy-Hass ist bereits eingerichtet.",
+      "single_instance_allowed": "Es kann nur eine Easy-Hass-Instanz eingerichtet werden."
+    }
+  },
+  "exceptions": {
+    "panel_path_in_use": {
+      "message": "Der Panel-Pfad /{path} wird bereits verwendet. Entferne die widersprüchliche Panel-Konfiguration und lade Easy-Hass neu."
+    },
+    "frontend_missing": {
+      "message": "Die Easy-Hass-Oberfläche fehlt. Kopiere den vollständigen Integrationsordner easy_hass einschließlich des Ordners frontend und lade die Integration neu."
+    }
+  }
+}
