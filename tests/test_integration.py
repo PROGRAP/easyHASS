@@ -13,6 +13,7 @@ from types import MappingProxyType
 import unittest
 from unittest.mock import patch
 
+from homeassistant import loader
 from homeassistant.components import frontend
 from homeassistant.components.http.cors import setup_cors
 from homeassistant.components.http.server import HomeAssistantHTTP
@@ -103,6 +104,31 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         flow.handler = DOMAIN
         flow.context = {"source": "user"}
         return flow
+
+    async def test_manifest_is_visible_in_add_integration_picker(self):
+        # Exercise HA's real manifest discovery and the metadata endpoint used by
+        # the picker. A working config flow alone does not guarantee visibility:
+        # integration_type="system" is deliberately omitted by HA.
+        loader.async_setup(self.hass)
+        descriptions = await loader.async_get_integration_descriptions(self.hass)
+        integrations = descriptions["custom"]["integration"]
+        self.assertIn(DOMAIN, integrations)
+        self.assertTrue(integrations[DOMAIN]["config_flow"])
+        self.assertEqual(integrations[DOMAIN]["name"], NAME)
+        self.assertTrue(integrations[DOMAIN]["single_config_entry"])
+
+        # Reproduce the alpha.1 regression in memory without changing any files.
+        discovered = await loader.async_get_custom_components(self.hass)
+        current = discovered[DOMAIN]
+        legacy_integration = loader.Integration(
+            self.hass,
+            current.pkg_path,
+            current.file_path,
+            {**current.manifest, "integration_type": "system"},
+        )
+        with patch.dict(discovered, {DOMAIN: legacy_integration}):
+            legacy = await loader.async_get_integration_descriptions(self.hass)
+        self.assertNotIn(DOMAIN, legacy["custom"]["integration"])
 
     async def test_setup_unload_reload_reuses_static_routes(self):
         self.assertTrue(await async_setup_entry(self.hass, self.entry))
