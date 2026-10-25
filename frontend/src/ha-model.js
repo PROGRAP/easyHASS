@@ -5,11 +5,18 @@ const BRIGHTNESS_MODES = new Set(['brightness', 'color_temp', 'hs', 'xy', 'rgb',
 const COVER = Object.freeze({ open: 1, close: 2, position: 4, stop: 8 });
 const VACUUM = Object.freeze({ start: 8192, pause: 4, stop: 8, return_to_base: 16, locate: 512, clean_spot: 1024 });
 const DETAIL_EXCLUDED_DOMAINS = new Set([
+  'sensor', 'binary_sensor',
   'automation', 'script', 'scene', 'update', 'person', 'weather', 'zone', 'sun',
   'device_tracker', 'persistent_notification', 'conversation', 'stt', 'tts',
   'ai_task', 'notify', 'wake_word',
 ]);
 export const UNASSIGNED_ROOM_ID = '__easy_hass_unassigned__';
+export const AREA_NAME_MAX_LENGTH = 100;
+// Verified against HA 2026.10.2 components/image_upload: MIME types and MAX_SIZE.
+export const AREA_IMAGE_ACCEPT = 'image/jpeg,image/png,image/gif';
+export const AREA_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+const AREA_IMAGE_TYPES = new Set(AREA_IMAGE_ACCEPT.split(','));
+const pendingAreaImages = new WeakMap();
 
 const entries = (value) => Array.isArray(value) ? value : Object.values(value || {});
 const numeric = (value) => value === null || value === undefined || value === '' || typeof value === 'boolean'
@@ -23,6 +30,381 @@ export async function loadRegistries(hass) {
   const values = await Promise.all(REGISTRIES.map((name) => hass.callWS({ type: `config/${name}_registry/list` })));
   if (values.some((value) => !Array.isArray(value))) throw new Error('Home Assistant hat ungültige Raum- oder Gerätedaten geliefert.');
   return { areas: values[0], devices: values[1], entities: values[2] };
+}
+
+function panelSettings(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !Array.isArray(value.hidden_area_ids)) {
+    throw new Error('Home Assistant hat ungültige Anzeigeeinstellungen geliefert.');
+  }
+  const ids = Array.from(value.hidden_area_ids);
+  if (ids.some(id => typeof id !== 'string' || !id.trim() || id !== id.trim() || id === UNASSIGNED_ROOM_ID)
+    || new Set(ids).size !== ids.length) {
+    throw new Error('Home Assistant hat ungültige Anzeigeeinstellungen geliefert.');
+  }
+  const result = { hidden_area_ids: [...ids] };
+  // Older EasyHASS backends did not include ordering in settings snapshots.
+  if (value.room_device_order !== undefined) {
+    const orders = value.room_device_order;
+    if (!orders || typeof orders !== 'object' || Array.isArray(orders)) throw new Error('Home Assistant hat ungültige Gerätereihenfolgen geliefert.');
+    result.room_device_order = Object.fromEntries(Object.entries(orders).map(([areaId, keys]) => {
+      validatedAreaId(areaId);
+      return [areaId, validatedAssignmentOrder(keys)];
+    }));
+  }
+  return result;
+}
+
+/** Panel-only preferences; every authenticated user may read the same snapshot. */
+export async function loadPanelSettings(hass) {
+  if (hass?.connected !== true || typeof hass.callWS !== 'function') throw new Error('Die Verbindung zu Home Assistant ist unterbrochen.');
+  return panelSettings(await hass.callWS({ type: 'easy_hass/settings/get' }));
+}
+
+/** The HA connection resubscribes on reconnect, receiving a fresh initial push.
+ * A ready refresh also reports a missing backend; newer pushes always win over
+ * an older in-flight read. Disposal silences both paths and releases listeners.
+ */
+export async function subscribePanelSettings(hass, onSettings, onError = () => {}) {
+  const connection = hass?.connection;
+  if (typeof connection?.subscribeMessage !== 'function') throw new Error('Die Home-Assistant-Verbindung fehlt.');
+  let active = true, revision = 0, request = 0, unsubscribe;
+  const receive = value => {
+    if (!active) return;
+    let settings;
+    try { settings = panelSettings(value); }
+    catch (error) { onError(error); return; }
+    revision++;
+    onSettings(settings);
+  };
+  const refresh = async () => {
+    if (!active) return;
+    const pending = ++request, before = revision;
+    try {
+      const settings = await loadPanelSettings(hass);
+      if (active && pending === request && before === revision) receive(settings);
+    } catch (error) {
+      if (active && pending === request && before === revision) onError(error);
+    }
+  };
+  const cleanup = () => {
+    if (!active) return;
+    active = false;
+    connection.removeEventListener?.('ready', refresh);
+    if (unsubscribe) Promise.resolve().then(unsubscribe).catch(() => {});
+  };
+  connection.addEventListener?.('ready', refresh);
+  try {
+    unsubscribe = await connection.subscribeMessage(receive, { type: 'easy_hass/settings/subscribe' }, { resubscribe: true });
+  } catch (error) { cleanup(); throw error; }
+  return cleanup;
+}
+
+/** Change one room's visibility without overwriting other clients' preferences. */
+export async function setRoomHidden(hass, areaId, hidden) {
+  requireAreaWrite(hass);
+  const id = validatedAreaId(areaId);
+  if (typeof hidden !== 'boolean') throw new TypeError('Die Sichtbarkeit muss ein Wahrheitswert sein.');
+  return panelSettings(await hass.callWS({ type: 'easy_hass/room_visibility/set', area_id: id, hidden }));
+}
+
+/** Actual HA areas, including empty ones, in HA's persisted registry order.
+ * Copies retain HA fields; id is normalized for UI use. No synthetic room is added.
+ */
+export function listRegisteredAreas(registries) {
+  return entries(registries?.areas).flatMap((area) => {
+    const id = area?.area_id || area?.id;
+    if (typeof id !== 'string' || !id.trim() || id === UNASSIGNED_ROOM_ID || area.unassigned || typeof area.name !== 'string') return [];
+    return [{ ...area, id, area_id: id }];
+  });
+}
+
+function assignmentKey(key) {
+  if (typeof key !== 'string') throw new TypeError('Bitte ein registriertes Gerät auswählen.');
+  const match = /^(device|entity):([^\s:]+)$/.exec(key);
+  if (!match || (match[1] === 'entity' && !/^[a-z0-9_]+\.[a-z0-9_]+$/.test(match[2]))) throw new TypeError('Bitte ein registriertes Gerät auswählen.');
+  return { kind: match[1], id: match[2] };
+}
+
+function validatedAssignmentOrder(keys) {
+  if (!Array.isArray(keys)) throw new TypeError('Die Gerätereihenfolge muss eine Liste sein.');
+  const result = Array.from(keys, key => { assignmentKey(key); return key; });
+  if (new Set(result).size !== result.length) throw new TypeError('Jedes Gerät darf nur einmal in der Reihenfolge vorkommen.');
+  return result;
+}
+
+function assignmentItems(registries, states) {
+  const areas = new Map(listRegisteredAreas(registries).map(area => [area.id, area.name]));
+  const registered = entries(registries?.entities), byEntity = new Map(registered.map(entity => [entity.entity_id, entity]));
+  const devices = entries(registries?.devices).filter(device => device?.id && !device.disabled_by).map(device => {
+    const entities = registered.filter(entity => entity.device_id === device.id);
+    return {
+      key: `device:${device.id}`, kind: 'device', id: device.id,
+      name: device.name_by_user || device.name || [device.manufacturer, device.model].filter(Boolean).join(' ') || 'Gerät',
+      areaId: device.area_id || null, areaName: areas.get(device.area_id) || null,
+      entityIds: entities.map(entity => entity.entity_id), entityCount: entities.length,
+      overrideCount: entities.filter(entity => entity.area_id && entity.area_id !== device.area_id).length,
+      explicitAreaCount: entities.filter(entity => entity.area_id).length,
+      isGroup: false, inherited: false,
+    };
+  });
+  const independent = deriveEntities(registries, states).filter(entity => {
+    const entry = byEntity.get(entity.id);
+    return entry && !entry.device_id && !entity.category && !DETAIL_EXCLUDED_DOMAINS.has(entity.domain);
+  }).map(entity => ({
+    key: `entity:${entity.id}`, kind: 'entity', id: entity.id, name: entity.name,
+    areaId: entity.areaId, areaName: areas.get(entity.areaId) || null,
+    entityIds: [entity.id], entityCount: 1, overrideCount: 0, explicitAreaCount: 0,
+    isGroup: entity.domain === 'group' || byEntity.get(entity.id)?.platform === 'group'
+      || (Array.isArray(entity.attributes.entity_id) && entity.attributes.entity_id.length > 0),
+    inherited: false,
+  }));
+  return [...devices, ...independent];
+}
+
+function assignmentRanks(order) {
+  return new Map((Array.isArray(order) ? order : []).map((key, index) => [key, index]));
+}
+
+function sortAssignments(items, order) {
+  const ranks = assignmentRanks(order);
+  return items.sort((a, b) => (ranks.get(a.key) ?? Infinity) - (ranks.get(b.key) ?? Infinity)
+    || a.name.localeCompare(b.name) || a.key.localeCompare(b.key));
+}
+
+/** Native devices (including sensor devices) plus independently assigned controls.
+ * A group inferred from its members is sortable, but removing its own null/foreign
+ * area would not remove those memberships; canRemove makes that distinction clear.
+ */
+export function listRoomAssignments(registries, states = {}, areaId, order = []) {
+  if (!listRegisteredAreas(registries).some(area => area.id === areaId)) return [];
+  const all = assignmentItems(registries, states), items = new Map();
+  for (const item of all) if (item.areaId === areaId) items.set(item.key, { ...item, canRemove: true });
+  const room = deriveRooms(registries, states).find(candidate => candidate.id === areaId);
+  const rows = deriveRoomDevices(room, deriveEntities(registries, states), deriveEntityScopes(registries, states));
+  for (const entity of rows) {
+    const key = entity.deviceId ? `device:${entity.deviceId}` : `entity:${entity.id}`;
+    const item = all.find(candidate => candidate.key === key);
+    if (item && !items.has(key)) items.set(key, { ...item, inherited: true, canRemove: false,
+      inheritedReason: entity.areaId === areaId ? 'entity' : 'group', isGroup: item.isGroup || entity.isGroup });
+  }
+  return sortAssignments([...items.values()], order);
+}
+
+/** Picker candidates retain their real current room; assigning moves that scope. */
+export function listAssignableDevices(registries, states = {}, areaId) {
+  if (!listRegisteredAreas(registries).some(area => area.id === areaId)) return [];
+  return sortAssignments(assignmentItems(registries, states).filter(item => item.areaId !== areaId), []);
+}
+
+/** Only native area_id changes. Entity overrides on physical devices are retained.
+ * Returns the updated device entry, or the entity response's entity_entry.
+ */
+export async function setDeviceRoom(hass, key, areaId) {
+  requireAreaWrite(hass);
+  const { kind, id } = assignmentKey(key), area = areaId === null ? null : validatedAreaId(areaId);
+  const connection = hass.connection, registries = await loadRegistries(hass);
+  requireAreaWrite(hass);
+  if (hass.connection !== connection) throw new Error('Die Verbindung zu Home Assistant hat sich geändert. Bitte erneut versuchen.');
+  if (area !== null && !listRegisteredAreas(registries).some(candidate => candidate.id === area)) throw new Error('Der ausgewählte Raum existiert nicht mehr.');
+  if (!assignmentItems(registries, hass.states || {}).some(item => item.key === key)) throw new Error('Das ausgewählte Gerät existiert nicht mehr oder kann hier nicht zugeordnet werden.');
+  const result = await hass.callWS({ type: `config/${kind}_registry/update`, [`${kind}_id`]: id, area_id: area });
+  return kind === 'entity' ? result?.entity_entry : result;
+}
+
+/** Save one room's order atomically; [] restores its default order. */
+export async function setRoomDeviceOrder(hass, areaId, keys) {
+  requireAreaWrite(hass);
+  const id = validatedAreaId(areaId), order = validatedAssignmentOrder(keys);
+  return panelSettings(await hass.callWS({ type: 'easy_hass/room_device_order/set', area_id: id, keys: order }));
+}
+
+export function validateAreaName(value) {
+  if (typeof value !== 'string' || !value.trim()) throw new TypeError('Bitte einen Raumnamen eingeben.');
+  const name = value.trim();
+  // A UI length bound, not a claim about the server's own name constraints.
+  if (name.length > AREA_NAME_MAX_LENGTH) throw new RangeError(`Der Raumname darf höchstens ${AREA_NAME_MAX_LENGTH} Zeichen lang sein.`);
+  return name;
+}
+
+function requireAreaWrite(hass) {
+  if (hass?.connected !== true || typeof hass.callWS !== 'function') throw new Error('Die Verbindung zu Home Assistant ist unterbrochen.');
+  if (hass.user?.is_admin !== true) throw new Error('Nur Administratoren können Räume bearbeiten.');
+}
+
+function validatedAreaId(areaId) {
+  if (typeof areaId !== 'string' || !areaId.trim() || areaId !== areaId.trim() || areaId === UNASSIGNED_ROOM_ID) {
+    throw new TypeError('Bitte einen registrierten Raum auswählen.');
+  }
+  return areaId;
+}
+
+function validatedAreaPicture(picture) {
+  if (picture === null) return null;
+  if (typeof picture !== 'string' || !picture || picture !== picture.trim()) throw new TypeError('Die Bildadresse ist ungültig.');
+  if (picture.startsWith('/') && !picture.startsWith('//')) return picture;
+  try {
+    const url = new URL(picture);
+    if (['http:', 'https:'].includes(url.protocol)) return picture;
+  } catch { /* A local preview/blob URL must never enter the HA registry. */ }
+  throw new TypeError('Die Bildadresse muss eine dauerhafte Home-Assistant- oder HTTP-Adresse sein.');
+}
+
+function areaChanges(changes) {
+  if (!changes || typeof changes !== 'object' || Array.isArray(changes)) throw new TypeError('Die Raumänderungen sind ungültig.');
+  if (Object.keys(changes).some(key => !['name', 'picture'].includes(key))) throw new TypeError('Nur Raumname und Bild können hier geändert werden.');
+  const result = {};
+  if (Object.hasOwn(changes, 'name')) result.name = validateAreaName(changes.name);
+  if (Object.hasOwn(changes, 'picture')) result.picture = validatedAreaPicture(changes.picture);
+  return result;
+}
+
+function imageIdFromPicture(picture) {
+  if (typeof picture !== 'string') return null;
+  if (picture.startsWith('media-source://image_upload/')) return picture.slice('media-source://image_upload/'.length).split('/')[0];
+  try { return new URL(picture, 'http://home-assistant.invalid').pathname.match(/^\/api\/image\/serve\/([^/]+)\//)?.[1] || null; }
+  catch { return null; }
+}
+
+async function writeArea(hass, payload) {
+  const uploads = pendingAreaImages.get(hass.connection);
+  const imageId = imageIdFromPicture(payload.picture), upload = uploads?.get(imageId);
+  if (upload?.deleting) throw new Error('Dieses Bild wird gerade verworfen. Bitte wähle es erneut aus.');
+  // Register ownership before the WS call can settle, including synchronous stubs.
+  const operation = Promise.resolve().then(() => hass.callWS(payload));
+  upload?.assignments.add(operation);
+  try {
+    const result = await operation;
+    if (upload && uploads.get(imageId) === upload) uploads.delete(imageId);
+    return result;
+  } finally { upload?.assignments.delete(operation); }
+}
+
+/** HA config/area_registry/create, with an optional atomic image assignment. */
+export async function createArea(hass, name, options = {}) {
+  requireAreaWrite(hass);
+  const changes = areaChanges(options);
+  if (Object.hasOwn(changes, 'name')) throw new TypeError('Den Raumnamen bitte als separates Argument übergeben.');
+  return writeArea(hass, { type: 'config/area_registry/create', name: validateAreaName(name), ...changes });
+}
+
+/** Only explicitly supplied name/picture fields change; picture:null removes it. */
+export async function updateArea(hass, areaId, changes) {
+  requireAreaWrite(hass);
+  const id = validatedAreaId(areaId), update = areaChanges(changes);
+  if (!Object.keys(update).length) throw new TypeError('Es wurden keine Raumänderungen angegeben.');
+  return writeArea(hass, { type: 'config/area_registry/update', area_id: id, ...update });
+}
+
+/** Backwards-compatible rename, preserving the image and every other HA field. */
+export function renameArea(hass, areaId, name) {
+  return updateArea(hass, areaId, { name });
+}
+
+/** Persist all actual areas in one native HA reorder command (HA 2026.10.2).
+ * The registry list is authoritative; synthetic rooms never enter this command.
+ * The server validates the complete ID set again atomically, so a concurrent
+ * room addition/removal rejects instead of silently losing it from the order.
+ */
+export async function reorderAreas(hass, orderedIds) {
+  requireAreaWrite(hass);
+  if (!Array.isArray(orderedIds)) throw new TypeError('Die Raumreihenfolge muss eine Liste von Raum-IDs sein.');
+  const ids = Array.from(orderedIds, validatedAreaId);
+  if (new Set(ids).size !== ids.length) throw new TypeError('Jeder Raum muss genau einmal in der Reihenfolge vorkommen.');
+  const connection = hass.connection;
+  const areas = await hass.callWS({ type: 'config/area_registry/list' });
+  requireAreaWrite(hass);
+  if (hass.connection !== connection) throw new Error('Die Verbindung zu Home Assistant hat sich geändert. Bitte erneut versuchen.');
+  if (!Array.isArray(areas)) throw new Error('Home Assistant hat ungültige Raumdaten geliefert.');
+  const currentIds = areas.map(area => area?.area_id || area?.id);
+  if (currentIds.some(id => typeof id !== 'string' || !id.trim() || id !== id.trim() || id === UNASSIGNED_ROOM_ID)
+    || new Set(currentIds).size !== currentIds.length) throw new Error('Home Assistant hat ungültige Raumdaten geliefert.');
+  const current = new Set(currentIds);
+  if (ids.length !== current.size || ids.some(id => !current.has(id))) {
+    throw new Error('Die Räume haben sich geändert. Bitte die aktuelle Liste erneut sortieren.');
+  }
+  return hass.callWS({ type: 'config/area_registry/reorder', area_ids: ids });
+}
+
+/** Pure selection validation; call before creating a preview or starting upload. */
+export function validateAreaImageFile(file) {
+  if (typeof File === 'undefined' || !(file instanceof File)) throw new TypeError('Bitte eine Bilddatei auswählen.');
+  if (!AREA_IMAGE_TYPES.has(file.type)) throw new TypeError('Bitte ein JPEG-, PNG- oder GIF-Bild auswählen.');
+  if (!file.size) throw new TypeError('Die Bilddatei ist leer.');
+  if (file.size > AREA_IMAGE_MAX_BYTES) throw new RangeError('Das Bild darf höchstens 10 MiB groß sein.');
+  return file;
+}
+
+function imageUploadConnection(hass) {
+  const connection = hass.connection;
+  if (!connection || (typeof connection !== 'object' && typeof connection !== 'function')) throw new Error('Die Home-Assistant-Verbindung fehlt.');
+  return connection;
+}
+
+/** Auth stays with HA. Do not manually construct bearer headers or Content-Type.
+ * API matches HA frontend src/data/image_upload.ts and the installed backend.
+ * Returns a URL suitable for area.picture and an ID for safe unattached cleanup.
+ */
+export async function uploadAreaImage(hass, file) {
+  requireAreaWrite(hass);
+  validateAreaImageFile(file);
+  const connection = imageUploadConnection(hass);
+  if (typeof hass.fetchWithAuth !== 'function') throw new Error('Der authentifizierte Bildupload ist nicht verfügbar.');
+  const body = new FormData();
+  body.append('file', file);
+  const response = await hass.fetchWithAuth('/api/image/upload', { method: 'POST', body });
+  if (response.status !== 200) {
+    let info;
+    try { info = await response.json(); } catch { /* HA can return plain HTTP errors. */ }
+    const error = new Error(response.status === 413 ? 'Das Bild darf höchstens 10 MiB groß sein.'
+      : info?.message || 'Das Bild konnte nicht hochgeladen werden.');
+    error.status = response.status;
+    if (typeof info?.code === 'string') error.code = info.code;
+    throw error;
+  }
+  const image = await response.json();
+  if (!image || typeof image.id !== 'string' || !/^[a-f0-9]{32}$/.test(image.id)) throw new Error('Home Assistant hat eine ungültige Bildantwort geliefert.');
+  let uploads = pendingAreaImages.get(connection);
+  if (!uploads) { uploads = new Map(); pendingAreaImages.set(connection, uploads); }
+  uploads.set(image.id, { assignments: new Set(), cleanup: null, deleting: false });
+  return { id: image.id, url: `/api/image/serve/${image.id}/512x512` };
+}
+
+/** Delete only this connection's own newly uploaded, unattached image.
+ * A failed WS response can follow a successful commit: always check actual areas.
+ * true = deleted, false = not owned/already assigned/referenced. Read failures
+ * reject without deleting. Prior room pictures are never registered as owned.
+ */
+export async function deleteUploadedAreaImage(hass, imageId) {
+  requireAreaWrite(hass);
+  const connection = imageUploadConnection(hass);
+  if (typeof imageId !== 'string' || !/^[a-f0-9]{32}$/.test(imageId)) throw new TypeError('Die Bild-ID ist ungültig.');
+  const uploads = pendingAreaImages.get(connection), upload = uploads?.get(imageId);
+  if (!upload) return false;
+  if (upload.cleanup) return upload.cleanup;
+  const cleanup = async () => {
+    while (uploads.get(imageId) === upload) {
+      if (upload.assignments.size) await Promise.allSettled([...upload.assignments]);
+      if (uploads.get(imageId) !== upload) return false;
+      const areas = await hass.callWS({ type: 'config/area_registry/list' });
+      if (!Array.isArray(areas)) throw new Error('Home Assistant hat ungültige Raumdaten geliefert.');
+      if (areas.some(area => imageIdFromPicture(area?.picture) === imageId)) { uploads.delete(imageId); return false; }
+      // Recheck after the asynchronous list to avoid deleting during assignment.
+      if (upload.assignments.size) continue;
+      if (uploads.get(imageId) !== upload) return false;
+      requireAreaWrite(hass);
+      if (hass.connection !== connection) return false;
+      upload.deleting = true;
+      try {
+        await hass.callWS({ type: 'image/delete', image_id: imageId });
+        uploads.delete(imageId);
+        return true;
+      } finally { upload.deleting = false; }
+    }
+    return false;
+  };
+  upload.cleanup = cleanup();
+  try { return await upload.cleanup; }
+  finally { upload.cleanup = null; }
 }
 
 /**
@@ -232,10 +614,15 @@ function deriveEntityScopes(registries, states) {
   })));
 }
 
-export function deriveHome(registries, states = {}) {
+export function deriveHome(registries, states = {}, settings = {}) {
   const entities = deriveEntities(registries, states);
+  const hiddenAreaIds = Array.isArray(settings) ? settings : settings?.hidden_area_ids;
+  const hidden = new Set(Array.isArray(hiddenAreaIds) ? hiddenAreaIds : []);
   return {
-    rooms: deriveRooms(registries, states), entities, entityScopes: deriveEntityScopes(registries, states),
+    // Visibility affects room navigation only. Keep topology for shared groups
+    // and leave independent sections such as the robot list fully available.
+    rooms: deriveRooms(registries, states).filter(room => room.unassigned || !hidden.has(room.id)),
+    entities, entityScopes: deriveEntityScopes(registries, states),
     vacuums: entities.filter((entity) => entity.domain === 'vacuum'),
     weather: entities.filter((entity) => entity.domain === 'weather'),
     people: entities.filter((entity) => entity.domain === 'person'),
@@ -250,7 +637,7 @@ export function deriveHome(registries, states = {}) {
  * allEntities supplies visible candidate rows. Optional entityScopes contains
  * topology only, including hidden members; it never supplies rows/suppressors.
  */
-export function deriveRoomDevices(room, allEntities = room.entities, entityScopes) {
+export function deriveRoomDevices(room, allEntities = room.entities, entityScopes, order = []) {
   const relevant = (entity) => entity?.id && !entity.category && !entity.hidden_by && !entity.disabled_by
     && !DETAIL_EXCLUDED_DOMAINS.has(entity.domain);
   const locals = (room.entities || []).filter(relevant);
@@ -315,7 +702,9 @@ export function deriveRoomDevices(room, allEntities = room.entities, entityScope
       isSharedGroup: memberScopes.some((member) => member.areaId && member.areaId !== room.id),
     });
   }
-  return rows.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+  const ranks = assignmentRanks(order);
+  const rank = entity => ranks.get(`entity:${entity.id}`) ?? ranks.get(`device:${entity.deviceId}`) ?? Infinity;
+  return rows.sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
 
 /** Reuse the room gesture/actions against exactly one real entity or HA group. */

@@ -23,7 +23,93 @@ Die Zuordnung erfolgt über die direkte Entity-Area, danach die Device-Area. Ver
 
 `lights` und `covers` enthalten normalisierte Entitäten: `{id, entity_id, domain, name, icon, areaId, deviceId, deviceClass, state, attributes, available, category, canDim, brightness, canOpen, canClose, canSetPosition, canStop, position, actions}`. Verfügbare Gruppen ersetzen ihre im selben Raum sichtbaren Mitglieder, damit ein Raumkommando nicht Gruppe und deren Mitglieder doppelt anspricht. Ausgefallene Gruppen verdecken keine erreichbaren Mitglieder. Konfigurations- und Diagnoseentitäten erzeugen keine alltäglichen Raumregler.
 
+Die Geräteliste der Raumansicht enthält keine `sensor`- oder `binary_sensor`-Einträge.
+Temperatur und Luftfeuchtigkeit werden weiterhin aus den Sensoren ermittelt und im Raumheader angezeigt.
+
+## Raumverwaltung
+
+Die Raumverwaltung unter **Mehr → Einstellungen → Räume** verwendet
+`listRegisteredAreas(registries)`: echte HA-Bereiche einschließlich leerer Räume,
+ohne den synthetischen Auffangbereich „Ohne Raum“. `createArea(hass, name, options)`
+und `updateArea(hass, areaId, changes)` verwenden die HA-Registry-WebSocket-Befehle.
+Schreiben erfordert eine aktive Verbindung und ein Administratorkonto. Namen
+werden getrimmt und auf 1–100 Zeichen begrenzt; beim Umbenennen bleibt die Area-ID
+erhalten. Das Bildfeld wird nur bei einer bewussten Bildänderung mitgeschrieben;
+Sensoren und Gerätezuordnungen bleiben unverändert.
+
+Die Bildauswahl erzeugt zunächst nur eine lokale Vorschau. Erst Speichern lädt
+JPG, PNG oder GIF bis 10 MiB über die authentifizierte HA-Bildverwaltung hoch und
+ordnet die zurückgegebene Bildadresse dem Raum zu. Entfernen setzt `picture` auf
+`null`. Bestehende Bilder werden nicht aus der Bildverwaltung gelöscht, da sie
+auch von anderen Räumen oder Ansichten verwendet werden können. Nicht zugeordnete
+eigene Uploads werden beim Verwerfen nach einer erneuten Referenzprüfung bereinigt.
+
+`reorderAreas(hass, orderedIds)` nutzt den nativen, atomaren HA-Befehl
+`config/area_registry/reorder`. Vor dem Schreiben werden die IDs gegen die
+aktuelle Registry geprüft: Jede echte Area muss genau einmal vorkommen.
+Die gespeicherte Registry-Reihenfolge gilt für die Einstellungen und die
+Startseite; „Ohne Raum“ bleibt als synthetischer Auffangbereich zuletzt.
+Das Ereignis `area_registry_updated` aktualisiert auch andere offene Ansichten.
+
+**In EasyHASS ausblenden** ist eine separate Anzeigeeinstellung pro Raum.
+`entry.options.hidden_area_ids` speichert sie zentral auf dem HA-Server; die
+nativen Areas, Geräte, Bilder und ihre Reihenfolge bleiben erhalten. Ausgeblendete
+Räume fehlen in der Übersicht und beim Wechseln der Raumdetails. In den
+Einstellungen bleiben sie mit „Ausgeblendet“ erreichbar; die Roboterliste und
+die vollständige Gruppenzuordnung bleiben unverändert.
+
+`easy_hass/settings/get` und `easy_hass/settings/subscribe` liefern authentifizierten
+Clients `{hidden_area_ids, room_device_order}`. `easy_hass/room_visibility/set` ändert als Administrator
+genau eine echte Area über `{area_id, hidden}` und verteilt den neuen Stand an
+alle Clients. Die Änderung wird erst mit **Speichern** übernommen. Vor dem ersten
+Einstellungs-Snapshot zeigt das Panel keine Raumkarten, damit ausgeblendete Räume
+nicht kurz aufblitzen. Direkte Links auf ausgeblendete Räume führen zur Übersicht.
+
+Unter **Räume → Raum → Geräte** lassen sich registrierte Geräte hinzufügen,
+aus der Raumzuordnung entfernen und am linken Griff sortieren. Die Auswahl zeigt
+den bisherigen Raum; Zuordnungen werden direkt über die native Geräte-Registry
+gespeichert. Eigenständige steuerbare Entitäten und Gruppen ohne Gerät verwenden
+die Entity-Registry. Explizite Raumzuordnungen einzelner Entitäten bleiben beim
+Verschieben ihres Geräts erhalten. Physische Sensorgeräte können zugeordnet werden,
+ihre einzelnen Sensorentitäten erzeugen weiterhin keine Zeilen in der Raumansicht.
+
+`easy_hass/room_device_order/set` speichert als Administrator `{area_id, keys}`
+in `entry.options.room_device_order`. Schlüssel sind `device:<id>` bzw.
+`entity:<entity_id>`; eine leere Liste entfernt die individuelle Sortierung.
+Der gemeinsame Einstellungs-Stream verteilt Änderungen an andere Clients.
+Eine individuell sortierte Raumansicht zeigt die steuerbaren Geräte unter
+**Geräte** in genau dieser Reihenfolge, auch über Gerätetypen hinweg. Ohne
+individuelle Sortierung bleiben die bisherigen Abschnitte erhalten.
+Gerätegruppen ersetzen weiterhin ihre Mitglieder; neue Geräte erscheinen hinten.
+
 ## Geräteaktionen
+
+Licht- und Rollladenknöpfe in der Raumübersicht schalten bei kurzem Tippen. Horizontales Ziehen bei
+gedrückter Maus oder mit dem Finger öffnet den Regler sofort und verändert den
+Wert bereits mit derselben Bewegung. Langes Halten öffnet ihn weiterhin nach
+400 ms. Eine kleine Bewegungstoleranz verhindert versehentliches Öffnen beim
+Tippen; vertikales Ziehen vor dem Öffnen bricht die Geste ab. Der angezeigte Wert wird erst beim
+Loslassen übernommen, Abbrechen verwirft ihn. Regler erscheinen nur für
+dimmbare Lichter beziehungsweise positionierbare Rollläden.
+
+In der Raumdetailansicht sind dieselben gelben und lila Balken dauerhaft sichtbar.
+Das Icon schaltet die jeweilige Entität oder Gruppe. Bei Licht öffnet ein kurzer
+Tipp auf den Balken die nativen Home-Assistant-Gerätedetails. Horizontales Ziehen
+ändert die Helligkeit, vertikales Ziehen scrollt die Raumansicht ohne Geräteaktion.
+Die Lichtfläche wartet auf eine eindeutige Richtung, bevor sie den Wert ändert;
+reine An/Aus-Lichter erhalten keine Helligkeitsregelung. Rollladenbalken stellen
+die Öffnung weiterhin durch Tippen oder Ziehen ein. Ein Wert wird beim
+Loslassen übernommen. Der Balken bleibt währenddessen in der Geräteliste,
+einschließlich Gerätename, Prozentwert und gegebenenfalls Gruppenhinweis.
+Geräte ohne entsprechende Einstellmöglichkeit zeigen nur ihren Status und den
+Schalter. Unbekannte Werte bleiben als „—“ gekennzeichnet.
+Das Glühbirnen-Symbol zeigt bekannte Helligkeit durch kurze Strahlen, die mit dem
+Wert länger und deutlicher werden, sowie eine dezente warme Innenfüllung.
+Übersicht und Raumdetails verwenden dieselbe Darstellung;
+beim Ziehen folgt sie der Vorschau und kehrt beim Abbrechen zum Gerätestand zurück.
+Reine An/Aus-Lampen zeigen nur die beiden Zustände, unbekannte Helligkeit bleibt neutral.
+Die Regler beschriften Licht bei 0/100 mit „Aus“/„An“ und Rollläden mit „Zu“/„Auf“.
+Zwischenwerte von 1 bis 99 behalten Zahl und Prozentzeichen, unbekannte Werte „—“.
 
 Alle Funktionen liefern ein Promise und lassen HA-Fehler zum UI durch. Vor dem Aufruf prüfen sie die aktuellen `hass.states` erneut. Jeder Service-Aufruf hat konkrete Entity-IDs; es gibt keine pauschalen Aktionen ohne Targets.
 

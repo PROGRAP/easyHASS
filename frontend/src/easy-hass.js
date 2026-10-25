@@ -1,13 +1,25 @@
 import { NavigationGuard } from './compatibility/navigation.js';
 import { loadRegistries, subscribeRegistries, deriveHome, pictureUrl, toggleRoomLights,
   setRoomBrightness, toggleRoomCovers, setRoomCoverPosition, callVacuumAction,
-  deriveRoomDevices, entityControlTarget, toggleEntity } from './ha-model.js';
-import { icon, coverIcon } from './icons.js';
+  deriveRoomDevices, entityControlTarget, toggleEntity, listRegisteredAreas, reorderAreas,
+  createArea, updateArea, validateAreaName, AREA_NAME_MAX_LENGTH,
+  subscribePanelSettings, setRoomHidden, listRoomAssignments, listAssignableDevices,
+  setDeviceRoom, setRoomDeviceOrder,
+  uploadAreaImage, deleteUploadedAreaImage, validateAreaImageFile, AREA_IMAGE_ACCEPT } from './ha-model.js';
+import { icon, coverIcon, lightIcon } from './icons.js';
+import { weatherCondition } from './weather.js';
+import { subscribeWeatherForecasts } from './weather-data.js';
+import { renderWeatherContent } from './weather-detail.js';
+import { morphWeather } from './weather-motion.js';
 import { updateMarkup } from './dom.js';
 import { morphControl } from './control-morph.js';
 import { renderRoomDetail } from './room-detail.js';
 import { captureRoomVisual, morphRoom } from './room-motion.js';
 import { RoomPhotoPalette } from './room-photo.js';
+import { AreaSorter } from './area-sorter.js';
+import { InlineControls } from './inline-controls.js';
+import { controlValueLabel } from './control-label.js';
+import { renderRoomDeviceSettings } from './room-device-settings.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const number = (value, digits = 1) => new Intl.NumberFormat('de-DE', { maximumFractionDigits: digits }).format(value);
@@ -33,17 +45,20 @@ export class EasyHassPanel extends HTMLElement {
     this._navigation = new NavigationGuard(this);
     this._tab = 'home';
     this._registryGeneration = 0;
+    this._settingsGeneration = 0;
     this._pending = new Set();
     this._media = matchMedia('(prefers-color-scheme: dark)');
     this._onThemeChange = () => this._applyTheme();
     this._onGlobalKey = event => {
-      if (event.key === 'Escape' && (this._gesture || this._adjustment || this._sheetOpen || this._roomMorph || event.composedPath().includes(this))) this._dismiss();
+      if (event.key === 'Escape' && (this._areaSorter?.cancel() || this._deviceSorter?.cancel())) { event.preventDefault(); return; }
+      if (event.key === 'Escape' && this._inlineControls?.active) { event.preventDefault(); this._inlineControls.cancel(); return; }
+      if (event.key === 'Escape' && (this._weatherOpen || this._gesture || this._adjustment || this._sheetOpen || this._roomMorph || event.composedPath().includes(this))) { event.preventDefault(); this._dismiss(); }
     };
-    this._onBlur = () => { this._cancelGesture(); this._cancelRoomSwipe(); };
+    this._onBlur = () => { this._inlineControls?.cancel(); this._cancelGesture(); this._cancelRoomSwipe(); this._areaSorter?.cancel(); this._deviceSorter?.cancel(); };
     this._onRoomRoute = () => this._syncRoomRoute();
     this._roomReduced = matchMedia('(prefers-reduced-motion: reduce)');
     this._onRoomMotionChange = () => { if (this._roomReduced.matches) { this._roomMorph?.finish(); this._finishRoomSlide(); } };
-    this._onRoomResize = () => { this._roomMorph?.finish(); this._cancelRoomSwipe(); this._finishRoomSlide(); this._positionRoomTrack(); };
+    this._onRoomResize = () => { this._inlineControls?.cancel(); this._areaSorter?.cancel(); this._deviceSorter?.cancel(); this._roomMorph?.finish(); this._cancelRoomSwipe(); this._finishRoomSlide(); this._positionRoomTrack(); };
   }
   set hass(value) {
     const previous = this._hass;
@@ -66,6 +81,36 @@ export class EasyHassPanel extends HTMLElement {
   connectedCallback() {
     loadLocalFont();
     if (!this.shadowRoot.hasChildNodes()) this._renderShell();
+    this._inlineControls = new InlineControls(this.shadowRoot, {
+      getTarget: id => {
+        const entity = this._detailDevices?.find(item => item.id === id);
+        return entity ? entityControlTarget(entity) : null;
+      },
+      canStart: () => this.isConnected && this._hass?.connected === true && !!this._room(this._presentedRoomId)
+        && !this._sheetOpen && !this._roomMorph && !this._roomSlide && !this._roomDrag && !this._closingRoom
+        && !this._gesture && !this._adjustment && !this._closingAdjustment,
+      isPending: (target, kind) => this._pending.has(`${target.id}:${kind}`),
+      commit: (target, kind, value) => this._run(`${target.id}:${kind}`, () => kind === 'light'
+        ? setRoomBrightness(this._hass, target, value) : setRoomCoverPosition(this._hass, target, value)),
+      toggle: (target, kind) => this._toggle(target, kind),
+      openDetails: target => this._openEntityDetails(target.lights[0]?.id),
+      end: () => { if (this.isConnected) { this._lastRoomMarkup = null; this._update(); } },
+    });
+    this._areaSorter = new AreaSorter(this.shadowRoot, {
+      canStart: () => this._sheetPage === 'rooms' && this._hass?.connected === true && this._hass?.user?.is_admin === true && !this._areaSave && !this._areaOrderSave && !this._deviceSave,
+      commit: ids => this._saveAreaOrder(ids),
+      announce: text => this._announceAreaOrder(text),
+      end: () => this._update(),
+    });
+    this._deviceSorter = new AreaSorter(this.shadowRoot, {
+      rowSelector: '[data-settings-device-row]', idAttribute: 'data-settings-device-row',
+      handleSelector: '[data-settings-device-drag]', handleIdAttribute: 'data-settings-device-drag',
+      labelSelector: '.settings-device-name', fallbackName: 'Gerät',
+      canStart: () => this._sheetPage === 'devices' && this._canEditRoomDevices() && !!this._panelSettings && !this._panelSettingsError,
+      commit: ids => this._saveDeviceOrder(ids),
+      announce: text => this._announceDeviceOrder(text),
+      end: () => this._update(),
+    });
     this._roomPhotos = new RoomPhotoPalette(this.shadowRoot);
     this._media.addEventListener('change', this._onThemeChange);
     window.addEventListener('keydown', this._onGlobalKey);
@@ -80,9 +125,17 @@ export class EasyHassPanel extends HTMLElement {
     this._navigation.start();
   }
   disconnectedCallback() {
+    this._disposeWeather();
+    this._inlineControls?.dispose(); this._inlineControls = null;
+    this._areaSorter?.dispose(); this._areaSorter = null;
+    this._deviceSorter?.dispose(); this._deviceSorter = null;
+    this._deviceSave = null;
+    this._areaOrderSave = null;
     this._registryGeneration++;
     this._registryCleanup?.();
     this._registryCleanup = null;
+    this._settingsGeneration++;
+    this._settingsCleanup?.(); this._settingsCleanup = null;
     this._cancelGesture();
     this._roomPhotos?.dispose(); this._roomPhotos = null;
     this._finishClosingAdjustment();
@@ -97,16 +150,24 @@ export class EasyHassPanel extends HTMLElement {
     this._roomMorph?.dispose(); this._roomMorph = null;
     this._cancelRoomSwipe(false); this._finishRoomSlide();
     this._presentedRoomId = null; this._closingRoom = false;
+    this._discardAreaDraft();
+    this._sheetOpen = false; this._sheetPage = null; this._areaSave = null;
+    this._sheetMotion?.cancel(); this._sheetMotion = null;
+    this.shadowRoot.getElementById('overlay-root')?.replaceChildren();
+    const roomRoot = this.shadowRoot.getElementById('room-root');
+    if (roomRoot) roomRoot.inert = false;
     this._lockRoomBackground(false);
     clearTimeout(this._toastTimer);
   }
   async _connect() {
+    this._connectPanelSettings();
     const generation = ++this._registryGeneration;
     this._registryCleanup?.();
     this._registryCleanup = null;
     if (!this._hass?.callWS || this._hass.connected === false) return;
     const accept = registries => {
       if (!this.isConnected || generation !== this._registryGeneration) return;
+      this._registryRevision = (this._registryRevision || 0) + 1;
       this._registries = registries;
       this._registryError = null;
       this._update();
@@ -129,6 +190,38 @@ export class EasyHassPanel extends HTMLElement {
       if (snapshot && revision === refreshes) accept(snapshot);
     } catch (error) { fail(error); }
   }
+  async _connectPanelSettings() {
+    const generation = ++this._settingsGeneration;
+    this._settingsCleanup?.(); this._settingsCleanup = null;
+    const hass = this._hass;
+    if (this._settingsConnection !== hass?.connection) {
+      this._settingsConnection = hass?.connection;
+      this._panelSettings = null; this._panelSettingsError = null;
+    }
+    if (hass?.connected !== true) return;
+    try {
+      const cleanup = await subscribePanelSettings(hass, settings => {
+        if (!this.isConnected || generation !== this._settingsGeneration) return;
+        this._acceptPanelSettings(settings);
+      }, error => {
+        if (!this.isConnected || generation !== this._settingsGeneration) return;
+        this._panelSettingsError = error?.message || 'Die Anzeigeeinstellungen konnten nicht geladen werden.';
+        this._update();
+      });
+      if (!this.isConnected || generation !== this._settingsGeneration) { cleanup(); return; }
+      this._settingsCleanup = cleanup;
+    } catch (error) {
+      if (!this.isConnected || generation !== this._settingsGeneration) return;
+      this._panelSettingsError = 'Die Anzeigeeinstellungen konnten nicht geladen werden.';
+      this._update();
+    }
+  }
+  _isRoomHidden(id) { return this._panelSettings?.hidden_area_ids.includes(id) || false; }
+  _acceptPanelSettings(settings) {
+    this._panelSettings = settings; this._panelSettingsError = null;
+    if (this._areaDraft && !this._areaDraft.hiddenDirty) this._areaDraft.hidden = this._isRoomHidden(this._areaDraft.id);
+    this._update();
+  }
   _renderShell() {
     this.shadowRoot.innerHTML = `
       <link rel="stylesheet" href="${new URL('./panel.css', import.meta.url).href}">
@@ -139,9 +232,10 @@ export class EasyHassPanel extends HTMLElement {
       </div>
       <div id="room-root"></div>
       <div id="overlay-root"></div>
+      <div id="weather-root"></div>
       <div class="toast" id="toast" role="alert" hidden></div>
       <span class="sr-only" id="connection-status" role="status"></span>
-      <span class="sr-only" id="gesture-hint">Kurz tippen zum Schalten. Zum Einstellen gedrückt halten und nach links oder rechts ziehen. Mit der Tastatur eine Pfeiltaste drücken.</span>`;
+      <span class="sr-only" id="gesture-hint">Kurz tippen zum Schalten. Zum Einstellen direkt nach links oder rechts ziehen oder gedrückt halten. Mit der Tastatur eine Pfeiltaste drücken.</span>`;
     this.shadowRoot.addEventListener('click', event => this._click(event));
     this.shadowRoot.addEventListener('pointerdown', event => this._pointerDown(event));
     this.shadowRoot.addEventListener('pointermove', event => this._pointerMove(event));
@@ -154,8 +248,25 @@ export class EasyHassPanel extends HTMLElement {
     this.shadowRoot.addEventListener('wheel', event => this._roomWheel(event), { passive: false });
     this.shadowRoot.addEventListener('contextmenu', event => { if (event.target.closest('[data-control]')) event.preventDefault(); });
     this.shadowRoot.addEventListener('keydown', event => this._keyDown(event));
-    this.shadowRoot.addEventListener('input', event => { if (event.target.id === 'adjust-range') this._setAdjustment(Number(event.target.value)); });
+    this.shadowRoot.addEventListener('input', event => {
+      if (event.target.id === 'adjust-range') this._setAdjustment(Number(event.target.value));
+      if (event.target.id === 'settings-room-name' && this._areaDraft) this._areaDraft.name = event.target.value;
+      if (event.target.id === 'settings-device-search') { this._deviceQuery = event.target.value; this._renderSheet(); }
+    });
+    this.shadowRoot.addEventListener('submit', event => {
+      if (!event.target.matches('.settings-form')) return;
+      event.preventDefault(); this._saveArea();
+    });
     this.shadowRoot.addEventListener('change', event => {
+      if (event.target.id === 'settings-room-hidden' && this._areaDraft) {
+        this._areaDraft.hidden = event.target.checked;
+        this._areaDraft.hiddenDirty = true;
+      }
+      if (event.target.id === 'settings-room-picture') {
+        const file = event.target.files?.[0];
+        event.target.value = '';
+        if (file) this._selectAreaPicture(file);
+      }
       if (event.target.name === 'appearance') {
         try { localStorage.setItem(this._themeKey(), event.target.value); } catch { /* Private mode can deny storage. */ }
         this._applyTheme();
@@ -178,13 +289,28 @@ export class EasyHassPanel extends HTMLElement {
   }
   _update() {
     if (!this.shadowRoot.getElementById('page')) return;
-    this._home = deriveHome(this._registries || {}, this._hass?.states || {});
+    this._home = deriveHome(this._registries || {}, this._hass?.states || {}, this._panelSettings);
+    this._syncWeatherData();
+    this._renderWeather();
+    // Do not briefly expose hidden rooms before the server preferences arrive.
+    if (!this._panelSettings) this._home.rooms = [];
+    if ([this._gesture, this._adjustment, this._closingAdjustment].some(control => this._isRoomHidden(control?.room.id))) {
+      this._cancelGesture(); this._finishClosingAdjustment();
+    }
+    if (this._isRoomHidden(this._selectedRoomId()) || this._isRoomHidden(this._presentedRoomId)) {
+      history.replaceState(history.state, '', location.pathname + location.search);
+      this._presentedRoomId = null; this._closingRoom = false; this._roomOpeningSource = null;
+      this._stopRoomMorph(); this._cancelRoomSwipe(false); this._finishRoomSlide();
+      this._cancelGesture(); this._finishClosingAdjustment();
+      this._needsRoomFocus = false;
+    }
     const selectedRoom = this._room(this._presentedRoomId);
-    this._detailDevices = selectedRoom ? deriveRoomDevices(selectedRoom, this._home.entities, this._home.entityScopes) : [];
+    this._detailDevices = selectedRoom ? deriveRoomDevices(selectedRoom, this._home.entities, this._home.entityScopes, this._roomDeviceOrder(selectedRoom.id)) : [];
+    this._inlineControls?.sync();
     this.shadowRoot.getElementById('expert-link').href = this._expertPath();
     const connected = this._hass?.connected;
     this.shadowRoot.getElementById('connection-status').textContent = connected ? 'Mit Home Assistant verbunden' : connected === false ? 'Verbindung unterbrochen' : 'Warte auf Home Assistant';
-    if (this._gesture || this._adjustment || this._closingAdjustment || this._roomMorph || this._roomDrag || this._roomSlide || this._closingRoom) return;
+    if (this._inlineControls?.active || this._gesture || this._adjustment || this._closingAdjustment || this._roomMorph || this._roomDrag || this._roomSlide || this._closingRoom) return;
     const active = this.shadowRoot.activeElement;
     const focus = active?.dataset.control ? { room: active.dataset.room, control: active.dataset.control } : null;
     const robotFocus = active?.dataset.vacuum ? { id: active.dataset.vacuum, action: active.dataset.action } : null;
@@ -192,28 +318,32 @@ export class EasyHassPanel extends HTMLElement {
     const content = this._tab === 'robot' ? this._renderRobots() : this._renderHome();
     if (this._lastPageMarkup !== content) { updateMarkup(page, content); this._lastPageMarkup = content; }
     this._renderRoomStage();
+    this._inlineControls?.sync();
     if (focus) [...this.shadowRoot.querySelectorAll('[data-control]')].find(el => !el.closest('[inert]') && el.dataset.room === focus.room && el.dataset.control === focus.control)?.focus({ preventScroll: true });
     if (robotFocus) {
       const buttons = [...page.querySelectorAll('[data-vacuum]')].filter(el => el.dataset.vacuum === robotFocus.id);
       (buttons.find(el => el.dataset.action === robotFocus.action) || buttons[0])?.focus({ preventScroll: true });
     }
     for (const button of this.shadowRoot.querySelectorAll('[data-tab]')) button.setAttribute('aria-current', button.dataset.tab === this._tab ? 'page' : 'false');
+    if (this._sheetOpen) this._renderSheet();
   }
   _status() {
     if (this._hass?.connected === false) return '<p class="status-banner" role="status">Verbindung unterbrochen. Die Verbindung wird wiederhergestellt …</p>';
     if (this._registryError) return `<div class="status-banner" role="status">${escape(this._registryError)} <button data-retry>Erneut versuchen</button></div>`;
+    if (this._panelSettingsError) return `<div class="status-banner" role="status">${escape(this._panelSettingsError)} <button data-retry>Erneut versuchen</button></div>`;
     return '';
   }
   _renderHome() {
     const weather = this._home.weather.find(entity => entity.available && isNumber(entity.attributes.temperature));
+    const condition = weather && weatherCondition(weather.state, this._hass?.states?.['sun.sun']?.state);
     const onCount = this._home.rooms.reduce((sum, room) => sum + room.light.onCount, 0);
     const lightCount = this._home.rooms.reduce((sum, room) => sum + room.light.count, 0);
     const name = this._hass?.user?.name || '';
     return `<header class="welcome"><h1>Willkommen Zuhause${name ? `<span>${escape(name)}</span>` : ''}</h1>
-      <div class="summary">${weather ? `<span class="summary-chip" aria-label="Temperatur draußen">${icon('weather')}<span>${number(Number(weather.attributes.temperature))}${escape(weather.attributes.temperature_unit || this._hass?.config?.unit_system?.temperature || '°')}</span></span>` : ''}
-      ${lightCount ? `<span class="summary-chip light-summary ${onCount ? 'active' : ''}">${icon('light')}<span>${onCount} ${onCount === 1 ? 'Lichtquelle' : 'Lichtquellen'}</span></span>` : ''}</div></header>
+      <div class="summary">${weather ? `<button type="button" class="summary-chip weather-summary" data-weather-open="${escape(weather.id)}" aria-haspopup="dialog" aria-expanded="${!!this._weatherOpen}" aria-controls="weather-dialog">${icon(condition.icon)}<span class="summary-chip-text"><span class="summary-chip-title">Wetter</span><span class="summary-chip-status">${escape(condition.label)} · ${number(Number(weather.attributes.temperature))} ${escape(weather.attributes.temperature_unit || this._hass?.config?.unit_system?.temperature || '°')}</span></span></button>` : ''}
+      ${lightCount ? `<span class="summary-chip light-summary ${onCount ? 'active' : ''}">${icon('light')}<span class="summary-chip-text"><span class="summary-chip-title">Lichtquellen</span><span class="summary-chip-status">${onCount} an</span></span></span>` : ''}</div></header>
       ${this._status()}
-      ${!this._registries && !this._registryError ? '<div class="empty-state" role="status">Dein Zuhause wird geladen …</div>' : this._home.rooms.length ? `<section class="room-grid" aria-label="Räume">${this._home.rooms.map(room => this._roomCard(room)).join('')}</section>` : '<section class="empty-state"><h2>Deine Räume</h2><p>Lege in Home Assistant Räume an und ordne deine Geräte zu. Sie erscheinen hier automatisch.</p><a data-easy-hass-exit href="/config/areas/dashboard">Räume einrichten</a></section>'}`;
+      ${!this._panelSettings || !this._registries ? (!this._panelSettingsError && !this._registryError ? '<div class="empty-state" role="status">Dein Zuhause wird geladen …</div>' : '') : this._home.rooms.length ? `<section class="room-grid" aria-label="Räume">${this._home.rooms.map(room => this._roomCard(room)).join('')}</section>` : listRegisteredAreas(this._registries).length ? '<section class="empty-state"><h2>Alle Räume ausgeblendet</h2><p>Unter Mehr → Einstellungen → Räume kannst du sie wieder einblenden.</p><button class="settings-new" data-settings-page="rooms">Räume verwalten</button></section>' : '<section class="empty-state"><h2>Deine Räume</h2><p>Lege in Home Assistant Räume an und ordne deine Geräte zu. Sie erscheinen hier automatisch.</p><a data-easy-hass-exit href="/config/areas/dashboard">Räume einrichten</a></section>'}`;
   }
   _reading(reading, kind) {
     if (!reading) return '';
@@ -238,8 +368,8 @@ export class EasyHassPanel extends HTMLElement {
     const entity = entityId ? `data-entity="${escape(entityId)}"` : '';
     const state = target[kind];
     const disabled = this._hass?.connected === false || !state.canToggle;
-    if (kind === 'cover') return `<button type="button" class="round-control cover-control" data-control="cover" data-room="${id}" ${entity} aria-label="${name}: Rollladen ${state.moving ? 'stoppen' : state.isOpen ? 'schließen' : 'öffnen'}${state.position === null ? '' : `, ${state.position} Prozent geöffnet`}" ${state.canSetPosition ? 'aria-describedby="gesture-hint"' : ''} ${disabled ? 'disabled' : ''}>${coverIcon(state.position ?? (state.allClosed ? 0 : 100))}${state.moving ? '<span class="motion-dot"></span>' : ''}</button>`;
-    return `<button type="button" class="round-control light-control ${state.isOn ? 'is-on' : ''}" data-control="light" data-room="${id}" ${entity} aria-label="${name}: Licht ${state.isOn ? 'ausschalten' : 'einschalten'}" aria-pressed="${state.isOn}" ${state.canDim ? 'aria-describedby="gesture-hint"' : ''} ${disabled ? 'disabled' : ''}>${icon('light')}</button>`;
+    if (kind === 'cover') return `<button type="button" class="round-control cover-control" data-control="cover" data-room="${id}" ${entity} aria-label="${name}: Rollladen ${state.moving ? 'stoppen' : state.isOpen ? 'schließen' : 'öffnen'}${state.position === null ? '' : `, ${controlValueLabel(kind, state.position)}`}" ${state.canSetPosition ? 'aria-describedby="gesture-hint"' : ''} ${disabled ? 'disabled' : ''}>${coverIcon(state.position ?? (state.allClosed ? 0 : 100))}${state.moving ? '<span class="motion-dot"></span>' : ''}</button>`;
+    return `<button type="button" class="round-control light-control ${state.isOn ? 'is-on' : ''}" data-control="light" data-room="${id}" ${entity} aria-label="${name}: Licht ${state.isOn ? 'ausschalten' : 'einschalten'}" aria-pressed="${state.isOn}" ${state.canDim ? 'aria-describedby="gesture-hint"' : ''} ${disabled ? 'disabled' : ''}>${lightIcon(state.canDim ? state.brightness : state.isOn ? 100 : 0)}</button>`;
   }
   _selectedRoomId() {
     if (!location.hash.startsWith('#room=')) return null;
@@ -260,13 +390,13 @@ export class EasyHassPanel extends HTMLElement {
     const rooms = this._home.rooms, selected = this._room(this._presentedRoomId);
     const callbacks = {
       reading: (value, kind) => this._reading(value, kind),
-      control: (target, kind, id) => this._controlButton(target, kind, id),
+      pending: (id, kind) => this._pending.has(`entity:${id}:${kind}`),
       status: this._status(),
     };
     const content = selected ? rooms.map(room => `<div class="room-slide" data-room-slide="${escape(room.id)}" ${room.id === selected.id ? '' : 'inert aria-hidden="true"'}>${renderRoomDetail(room,
-      deriveRoomDevices(room, this._home.entities, this._home.entityScopes), this._hass,
-      { ...callbacks, current: room.id === selected.id })}</div>`).join('')
-      : `<div class="room-slide"><div class="room-detail" data-current-room><button class="room-back" data-room-back aria-label="Zurück zu Zuhause">${icon('close')}</button><div class="empty-state"><h1 tabindex="-1">${this._registries ? 'Raum nicht mehr vorhanden' : 'Dein Raum wird geladen …'}</h1></div>${this._status()}</div></div>`;
+      deriveRoomDevices(room, this._home.entities, this._home.entityScopes, this._roomDeviceOrder(room.id)), this._hass,
+      { ...callbacks, current: room.id === selected.id, customOrder: this._roomDeviceOrder(room.id).length > 0 })}</div>`).join('')
+      : `<div class="room-slide"><div class="room-detail" data-current-room><button class="room-back" data-room-back aria-label="Zurück zu Zuhause">${icon('close')}</button><div class="empty-state"><h1 tabindex="-1">${this._registries && this._panelSettings ? 'Raum nicht mehr vorhanden' : 'Dein Raum wird geladen …'}</h1></div>${this._status()}</div></div>`;
     const html = `<section class="room-stage" role="dialog" aria-modal="true" aria-label="${escape(selected?.name || 'Raum')}">
       <div class="room-backdrop" data-room-back></div>
       <div class="room-viewport"><div class="room-track">${content}</div></div>
@@ -280,6 +410,7 @@ export class EasyHassPanel extends HTMLElement {
     if (this._needsRoomFocus && selected) { this._needsRoomFocus = false; this._focusRoom(); }
   }
   _lockRoomBackground(open) {
+    open = open || !!this._weatherOpen;
     const app = this.shadowRoot.getElementById('app-content');
     if (app) app.inert = open || !!this._adjustment?.keyboard || !!this._sheetOpen;
     if (open && !this._roomScrollLock) {
@@ -310,8 +441,10 @@ export class EasyHassPanel extends HTMLElement {
   }
   _syncRoomRoute() {
     const id = this._selectedRoomId();
+    if (id && this._weatherOpen) this._disposeWeather();
     if (id === (this._presentedRoomId || null) && !this._closingRoom) { this._update(); return; }
     if (!id && this._closingRoom) return;
+    this._inlineControls?.cancel();
     const interrupted = this._stopRoomMorph();
     this._cancelRoomSwipe(false); this._finishRoomSlide();
     this._cancelGesture(); this._finishClosingAdjustment(); this._tab = 'home';
@@ -371,6 +504,7 @@ export class EasyHassPanel extends HTMLElement {
   }
   _changeRoom(id, from = this._roomTrackVisualOffset()) {
     if (!this._room(id) || this._closingRoom) return;
+    this._inlineControls?.cancel();
     this._roomMorph?.finish(); this._finishRoomSlide();
     this._cancelGesture(); this._finishClosingAdjustment();
     history.replaceState(history.state, '', `#room=${encodeURIComponent(id)}`);
@@ -403,9 +537,65 @@ export class EasyHassPanel extends HTMLElement {
   }
   _toggle(room, kind) {
     if (!room) return;
-    this._run(`${room.id}:${kind}`, () => kind === 'light' ? toggleRoomLights(this._hass, room) : toggleRoomCovers(this._hass, room));
+    return this._run(`${room.id}:${kind}`, () => kind === 'light' ? toggleRoomLights(this._hass, room) : toggleRoomCovers(this._hass, room));
+  }
+  _openEntityDetails(entityId) {
+    if (!this._detailDevices?.some(entity => entity.id === entityId)) return;
+    this.dispatchEvent(new CustomEvent('hass-more-info', { bubbles: true, composed: true, detail: { entityId } }));
   }
   _click(event) {
+    // Pointer gestures already own their action. Consume the browser's follow-up
+    // click even if cancellation released capture over the underlying room card.
+    if (event.detail !== 0 && this._suppressControlClick) {
+      this._suppressControlClick = false;
+      event.preventDefault(); event.stopPropagation(); return;
+    }
+    if (event.target.closest('[data-weather-close]')) { this._closeWeather(); return; }
+    if (event.target.closest('[data-weather-retry]')) { this._syncWeatherData(true); return; }
+    const weather = event.target.closest('[data-weather-open]');
+    if (weather) { this._openWeather(weather); return; }
+    if (event.target.closest('[data-settings-drag], [data-settings-device-drag]')) { event.preventDefault(); return; }
+    if (event.target.closest('[data-sheet-close]')) { this._closeSheet(); return; }
+    if (event.target.closest('[data-settings-back]')) { this._sheetBack(); return; }
+    const settingsPage = event.target.closest('[data-settings-page]:not(:disabled)');
+    if (settingsPage) { this._showSheet(settingsPage.dataset.settingsPage); return; }
+    if (event.target.closest('[data-settings-device-add]:not(:disabled)')) {
+      this._deviceQuery = ''; this._deviceError = null;
+      this._showSheet('add-device', '#settings-device-search'); return;
+    }
+    const assignDevice = event.target.closest('[data-settings-device-assign]:not(:disabled)');
+    if (assignDevice) { this._assignRoomDevice(assignDevice.dataset.settingsDeviceAssign, false); return; }
+    const removeDevice = event.target.closest('[data-settings-device-remove]:not(:disabled)');
+    if (removeDevice) { this._assignRoomDevice(removeDevice.dataset.settingsDeviceRemove, true); return; }
+    if (event.target.closest('[data-settings-picture]:not(:disabled)')) {
+      this.shadowRoot.getElementById('settings-room-picture')?.click(); return;
+    }
+    if (event.target.closest('[data-settings-picture-remove]:not(:disabled)')) {
+      const draft = this._areaDraft;
+      if (draft && !this._areaSave) {
+        draft.pictureVersion = (draft.pictureVersion || 0) + 1;
+        this._clearAreaPicture(draft);
+        draft.picture = null; draft.pictureDirty = true; draft.pictureLoading = false; draft.pictureError = null;
+        this._renderSheet();
+        this.shadowRoot.querySelector('[data-settings-picture]')?.focus({ preventScroll: true });
+      }
+      return;
+    }
+    if (event.target.closest('[data-settings-new]:not(:disabled)')) {
+      this._discardAreaDraft();
+      this._areaDraft = { name: '', hidden: false }; this._areaError = null;
+      this._showSheet('create', '#settings-room-name'); return;
+    }
+    const settingsArea = event.target.closest('[data-settings-area]:not(:disabled)');
+    if (settingsArea) {
+      const area = listRegisteredAreas(this._registries).find(item => item.id === settingsArea.dataset.settingsArea);
+      if (area) {
+        this._discardAreaDraft();
+        this._areaDraft = { id: area.id, name: area.name, originalName: area.name, picture: area.picture || null, hidden: this._isRoomHidden(area.id) }; this._areaError = null;
+        this._showSheet('edit', '#settings-room-name');
+      }
+      return;
+    }
     if (event.target.closest('[data-room-back]')) { this._returnHome(); return; }
     const roomPage = event.target.closest('[data-room-page]');
     if (roomPage) { this._changeRoom(roomPage.dataset.roomPage); return; }
@@ -438,7 +628,7 @@ export class EasyHassPanel extends HTMLElement {
     }
     const moreInfo = event.target.closest('[data-more-info]');
     if (moreInfo) {
-      if (this._detailDevices?.some(entity => entity.id === moreInfo.dataset.moreInfo)) this.dispatchEvent(new CustomEvent('hass-more-info', { bubbles: true, composed: true, detail: { entityId: moreInfo.dataset.moreInfo } }));
+      this._openEntityDetails(moreInfo.dataset.moreInfo);
       return;
     }
     const tab = event.target.closest('[data-tab]')?.dataset.tab;
@@ -473,6 +663,7 @@ export class EasyHassPanel extends HTMLElement {
   }
   _pointerDown(event) {
     this._ignoreRoomClickUntil = 0;
+    if (event.isPrimary && event.button === 0) this._suppressControlClick = false;
     const button = event.target.closest('[data-control]');
     if (!button) { this._roomPointerDown(event); return; }
     if (this._roomMorph || this._roomSlide || this._closingRoom) return;
@@ -483,23 +674,31 @@ export class EasyHassPanel extends HTMLElement {
     const kind = button.dataset.control;
     if (this._pending.has(`${room.id}:${kind}`)) return;
     const canAdjust = kind === 'light' ? room.light.canDim : room.cover.canSetPosition;
-    const gesture = { button, room, kind, pointerId: event.pointerId, x: event.clientX, y: event.clientY, lastX: event.clientX, held: false, canceled: false };
+    const gesture = { button, room, kind, canAdjust, pointerId: event.pointerId, x: event.clientX, y: event.clientY, lastX: event.clientX, held: false, canceled: false };
     this._gesture = gesture;
     button.setPointerCapture(event.pointerId);
-    if (canAdjust) gesture.timer = setTimeout(() => {
-      if (this._gesture !== gesture || gesture.canceled) return;
-      gesture.held = true;
-      this._openAdjustment(room, kind, button, false, gesture.lastX);
-    }, 400);
+    if (canAdjust) gesture.timer = setTimeout(() => this._openGestureAdjustment(gesture, gesture.lastX), 400);
+  }
+  _openGestureAdjustment(gesture, anchorX) {
+    if (this._gesture !== gesture || gesture.canceled || gesture.held || !gesture.canAdjust) return;
+    clearTimeout(gesture.timer);
+    gesture.held = true;
+    this._openAdjustment(gesture.room, gesture.kind, gesture.button, false, anchorX);
   }
   _pointerMove(event) {
     const gesture = this._gesture;
     if (!gesture) { this._roomPointerMove(event); return; }
-    if (!gesture || event.pointerId !== gesture.pointerId) return;
+    if (event.pointerId !== gesture.pointerId || gesture.canceled) return;
     gesture.lastX = event.clientX;
     if (!gesture.held) {
-      if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 12) { clearTimeout(gesture.timer); gesture.canceled = true; }
-      return;
+      const dx = Math.abs(event.clientX - gesture.x), dy = Math.abs(event.clientY - gesture.y);
+      // A small directional threshold distinguishes a deliberate drag from tap jitter.
+      if (gesture.canAdjust && dx >= 8 && dx > dy * 1.2) {
+        this._openGestureAdjustment(gesture, gesture.x);
+      } else {
+        if (Math.hypot(dx, dy) > 12) { clearTimeout(gesture.timer); gesture.canceled = true; }
+        return;
+      }
     }
     event.preventDefault();
     const adjustment = this._adjustment;
@@ -514,6 +713,7 @@ export class EasyHassPanel extends HTMLElement {
     if (!gesture) { this._roomPointerUp(event); return; }
     if (!gesture || event.pointerId !== gesture.pointerId) return;
     clearTimeout(gesture.timer);
+    this._suppressControlClick = true;
     this._gesture = null;
     if (gesture.button.hasPointerCapture(event.pointerId)) gesture.button.releasePointerCapture(event.pointerId);
     if (gesture.held) this._commitAdjustment();
@@ -523,14 +723,18 @@ export class EasyHassPanel extends HTMLElement {
   _cancelGesture() {
     const gesture = this._gesture;
     this._gesture = null;
-    if (gesture) { clearTimeout(gesture.timer); if (gesture.button.hasPointerCapture(gesture.pointerId)) gesture.button.releasePointerCapture(gesture.pointerId); }
+    if (gesture) {
+      this._suppressControlClick = true;
+      clearTimeout(gesture.timer);
+      if (gesture.button.hasPointerCapture(gesture.pointerId)) gesture.button.releasePointerCapture(gesture.pointerId);
+    }
     if (this._adjustment) this._closeAdjustment();
   }
   _roomPointerDown(event) {
-    if (!this._presentedRoomId || this._closingRoom || this._roomMorph || this._gesture || this._adjustment
+    if (!this._presentedRoomId || this._closingRoom || this._roomMorph || this._inlineControls?.active || this._gesture || this._adjustment
       || event.button !== 0 || !event.isPrimary || this._home.rooms.length < 2) return;
     const surface = event.target.closest('.room-detail[data-current-room]');
-    if (!surface || event.target.closest('[data-control], [data-toggle-entity], [data-room-back], input, select, textarea, a')) return;
+    if (!surface || event.target.closest('.inline-control, [data-control], [data-toggle-entity], [data-room-back], input, select, textarea, a')) return;
     const base = this._roomTrackVisualOffset();
     this._finishRoomSlide();
     this._positionRoomTrack(base);
@@ -575,7 +779,7 @@ export class EasyHassPanel extends HTMLElement {
     else this._positionRoomTrack();
   }
   _roomWheel(event) {
-    if (event.ctrlKey || !this._presentedRoomId || this._gesture || this._adjustment || this._roomMorph || this._closingRoom
+    if (event.ctrlKey || !this._presentedRoomId || this._inlineControls?.active || this._gesture || this._adjustment || this._roomMorph || this._closingRoom || event.target.closest('.inline-control')
       || !event.target.closest('.room-stage') || Math.abs(event.deltaX) <= Math.abs(event.deltaY) * 1.3) return;
     event.preventDefault();
     const now = performance.now();
@@ -589,6 +793,15 @@ export class EasyHassPanel extends HTMLElement {
     if (next) this._changeRoom(next.id);
   }
   _keyDown(event) {
+    if (this._weatherOpen) {
+      if (event.key === 'Tab') {
+        const elements = [...this.shadowRoot.querySelectorAll('#weather-root button, #weather-root [tabindex="0"]')].filter(el => !el.disabled && !el.hidden);
+        const first = elements[0], last = elements.at(-1), active = this.shadowRoot.activeElement;
+        if (event.shiftKey && (active === first || !elements.includes(active))) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && (active === last || !elements.includes(active))) { event.preventDefault(); first?.focus(); }
+      }
+      return;
+    }
     // Keep the captured pointer gesture as the single owner of the open control.
     if (this._gesture) {
       if (['Tab', 'Enter', ' ', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) event.preventDefault();
@@ -602,7 +815,7 @@ export class EasyHassPanel extends HTMLElement {
       if (!event.shiftKey && this.shadowRoot.activeElement === last) { event.preventDefault(); first?.focus(); }
     }
     if (event.key === 'Tab' && this._sheetOpen) {
-      const elements = [...this.shadowRoot.querySelectorAll('.sheet button, .sheet a, .sheet input')].filter(el => !el.disabled);
+      const elements = [...this.shadowRoot.querySelectorAll('.sheet button, .sheet a, .sheet input')].filter(el => !el.disabled && !el.hidden);
       const first = elements[0], last = elements.at(-1);
       if (event.shiftKey && this.shadowRoot.activeElement === first) { event.preventDefault(); last?.focus(); }
       if (!event.shiftKey && this.shadowRoot.activeElement === last) { event.preventDefault(); first?.focus(); }
@@ -615,7 +828,7 @@ export class EasyHassPanel extends HTMLElement {
         if (event.shiftKey && (active === first || active?.matches('h1'))) { event.preventDefault(); last?.focus(); }
         else if (!event.shiftKey && active === last) { event.preventDefault(); first?.focus(); }
       }
-      if (['ArrowLeft', 'ArrowRight'].includes(event.key) && !event.target.closest('[data-control], input, textarea, select')) {
+      if (['ArrowLeft', 'ArrowRight'].includes(event.key) && !event.target.closest('.inline-control, [data-control], input, textarea, select')) {
         event.preventDefault();
         const index = this._home.rooms.findIndex(room => room.id === this._presentedRoomId);
         const next = this._home.rooms[index + (event.key === 'ArrowRight' ? 1 : -1)];
@@ -647,8 +860,8 @@ export class EasyHassPanel extends HTMLElement {
     const label = kind === 'light' ? 'Licht' : 'Rollladen';
     this.shadowRoot.getElementById('overlay-root').innerHTML = `<div class="adjust-backdrop" data-dismiss></div>
       <div class="adjust-wrap ${kind}" style="left:${left}px;top:${top}px;width:${width}px" role="dialog" aria-modal="true" aria-label="${escape(room.name)}: ${label} einstellen">
-        <div class="adjust-bar"><div class="adjust-fill" id="adjust-fill" style="width:${actual ?? 0}%"></div><div class="adjust-icon" id="adjust-icon">${kind === 'light' ? icon('light') : coverIcon(actual)}</div><span class="adjust-title">${escape(room.name)}</span><output id="adjust-value">${actual ?? '—'} %</output>
-        ${keyboard ? `<input id="adjust-range" type="range" min="0" max="100" step="1" value="${value}" aria-label="${label}: ${kind === 'light' ? 'Helligkeit' : 'Öffnung'} in Prozent">` : ''}</div>
+        <div class="adjust-bar"><div class="adjust-fill" id="adjust-fill" style="width:${actual ?? 0}%"></div><div class="adjust-icon" id="adjust-icon">${kind === 'light' ? lightIcon(actual) : coverIcon(actual)}</div><span class="adjust-title">${escape(room.name)}</span><output id="adjust-value">${controlValueLabel(kind, actual)}</output>
+        ${keyboard ? `<input id="adjust-range" type="range" min="0" max="100" step="1" value="${value}" aria-label="${label}: ${kind === 'light' ? 'Helligkeit' : 'Öffnung'} in Prozent" aria-valuetext="${actual === null ? 'Wert unbekannt' : controlValueLabel(kind, actual)}">` : ''}</div>
         ${keyboard ? '<div class="adjust-actions"><button data-dismiss>Abbrechen</button><button data-apply>Übernehmen</button></div>' : ''}
       </div>`;
     this._adjustment.morph = morphControl(this.shadowRoot.getElementById('overlay-root'), button);
@@ -659,8 +872,11 @@ export class EasyHassPanel extends HTMLElement {
     this._adjustment.dirty = !this._adjustment.known || value !== this._adjustment.anchorValue;
     this._adjustment.value = value;
     this.shadowRoot.getElementById('adjust-fill').style.width = `${value}%`;
-    this.shadowRoot.getElementById('adjust-value').textContent = `${value} %`;
+    const label = controlValueLabel(this._adjustment.kind, value);
+    this.shadowRoot.getElementById('adjust-value').textContent = label;
+    this.shadowRoot.getElementById('adjust-range')?.setAttribute('aria-valuetext', label);
     if (this._adjustment.kind === 'cover') this.shadowRoot.getElementById('adjust-icon').innerHTML = coverIcon(value);
+    else this.shadowRoot.querySelector('#adjust-icon .light-state-icon')?.style.setProperty('--light-level', String(value / 100));
   }
   _commitAdjustment() {
     const adjustment = this._adjustment;
@@ -703,27 +919,455 @@ export class EasyHassPanel extends HTMLElement {
     this._lockRoomBackground(!!this._presentedRoomId);
     this._update();
   }
+  _openWeather(button) {
+    if (this._weatherOpen || this._sheetOpen || this._presentedRoomId || this._roomMorph || this._adjustment || this._gesture) return;
+    const entityId = button.dataset.weatherOpen;
+    if (!this._hass?.states?.[entityId]) return;
+    this._finishClosingAdjustment();
+    this._weatherOpen = { entityId };
+    this._weatherClosing = false;
+    this._weatherForecasts = null;
+    this._lastWeatherMarkup = null;
+    const root = this.shadowRoot.getElementById('weather-root');
+    root.innerHTML = `<div class="weather-backdrop" data-weather-close></div><section class="weather-dialog" id="weather-dialog" role="dialog" aria-modal="true" aria-labelledby="weather-title" tabindex="-1"><header class="weather-header"><h2 id="weather-title">Wetter</h2><button type="button" class="weather-close" data-weather-close aria-label="Wetter schließen">${icon('close')}</button></header><div class="weather-scroll" tabindex="0" role="region" aria-label="Wetterdetails, nach unten scrollbar"><div id="weather-content"></div></div></section>`;
+    this._lockRoomBackground(true);
+    this.shadowRoot.getElementById('room-root').inert = true;
+    this._update();
+    this._weatherMotion = morphWeather(root, button);
+    root.querySelector('button[data-weather-close]').focus({ preventScroll: true });
+  }
+  _syncWeatherData(force = false) {
+    if (!this._weatherOpen || this._weatherClosing) return;
+    const entityId = this._weatherOpen.entityId, entity = this._hass?.states?.[entityId];
+    const connection = this._hass?.connection;
+    const available = !!entity && !['unavailable', 'unknown'].includes(entity.state) && this._hass?.connected === true;
+    const features = Number(entity?.attributes?.supported_features || 0);
+    const previous = this._weatherSubscription;
+    if (!force && previous?.connection === connection && previous?.entityId === entityId && previous?.available === available && previous?.features === features) return;
+    this._stopWeatherData();
+    this._weatherSubscription = { connection, entityId, available, features };
+    this._weatherForecasts = null;
+    if (!available) return;
+    const generation = this._weatherGeneration;
+    this._weatherCleanup = subscribeWeatherForecasts(this._hass, entityId, forecasts => {
+      if (!this.isConnected || !this._weatherOpen || this._weatherClosing || generation !== this._weatherGeneration) return;
+      this._weatherForecasts = forecasts;
+      this._renderWeather();
+    });
+  }
+  _stopWeatherData() {
+    this._weatherGeneration = (this._weatherGeneration || 0) + 1;
+    this._weatherCleanup?.(); this._weatherCleanup = null;
+    this._weatherSubscription = null;
+  }
+  _renderWeather() {
+    if (!this._weatherOpen || this._weatherClosing) return;
+    const content = this.shadowRoot.getElementById('weather-content');
+    if (!content) return;
+    const markup = renderWeatherContent(this._hass?.states?.[this._weatherOpen.entityId], this._weatherForecasts, this._hass);
+    // Keep the dialog, focus and both scroll containers stable during live pushes.
+    if (markup !== this._lastWeatherMarkup) { updateMarkup(content, markup); this._lastWeatherMarkup = markup; }
+  }
+  _closeWeather() {
+    if (!this._weatherOpen || this._weatherClosing) return;
+    this._weatherClosing = true;
+    this._stopWeatherData();
+    const root = this.shadowRoot.getElementById('weather-root');
+    root.inert = true;
+    const finish = () => {
+      this._disposeWeather();
+      if (!this.isConnected) return;
+      this._update();
+      (this.shadowRoot.querySelector('[data-weather-open]') || this.shadowRoot.querySelector('[data-tab="home"]'))?.focus({ preventScroll: true });
+    };
+    if (this._weatherMotion) this._weatherMotion.close(finish);
+    else finish();
+  }
+  _disposeWeather() {
+    this._stopWeatherData();
+    this._weatherMotion?.dispose(); this._weatherMotion = null;
+    this._weatherOpen = null; this._weatherClosing = false;
+    this._weatherForecasts = null; this._lastWeatherMarkup = null;
+    const root = this.shadowRoot.getElementById('weather-root');
+    if (root) { root.replaceChildren(); root.inert = false; }
+    const rooms = this.shadowRoot.getElementById('room-root');
+    if (rooms) rooms.inert = !!this._sheetOpen;
+    this._lockRoomBackground(!!this._presentedRoomId);
+  }
   _showMore() {
     this._cancelGesture();
     this._finishClosingAdjustment();
+    this._showSheet('more');
+  }
+  _showSheet(page, focusSelector) {
+    if (!['more', 'settings', 'rooms', 'create', 'edit', 'devices', 'add-device'].includes(page)) return;
+    if (['devices', 'add-device'].includes(page) && !this._areaDraft?.id) return;
+    if (this._weatherOpen) this._disposeWeather();
+    this._inlineControls?.cancel();
+    this._areaSorter?.cancel();
+    this._deviceSorter?.cancel();
+    const previousHeight = this.shadowRoot.querySelector('.sheet')?.getBoundingClientRect().height;
     this._sheetOpen = true;
+    this._sheetPage = page;
+    this.shadowRoot.getElementById('app-content').inert = true;
+    this.shadowRoot.getElementById('room-root').inert = true;
+    this._renderSheet(true);
+    const sheet = this.shadowRoot.querySelector('.sheet');
+    if (previousHeight && !this._roomReduced.matches) {
+      this._sheetMotion = sheet.animate([{ height: `${previousHeight}px` }, { height: `${sheet.getBoundingClientRect().height}px` }],
+        { duration: 260, easing: 'cubic-bezier(.22,1,.36,1)' });
+    }
+    ((focusSelector && sheet.querySelector(`${focusSelector}:not(:disabled)`)) || sheet.querySelector('button:not(:disabled)'))?.focus({ preventScroll: true });
+  }
+  _renderMore() {
     const appearance = this._appearance();
     const restore = new URL(window.location.href);
     restore.searchParams.set('easy_hass_navigation', 'show');
-    this.shadowRoot.getElementById('app-content').inert = true;
-    this.shadowRoot.getElementById('overlay-root').innerHTML = `<div class="sheet-backdrop" data-dismiss></div><section class="sheet" role="dialog" aria-modal="true" aria-labelledby="more-title"><div class="sheet-heading"><h2 id="more-title">Mehr</h2><button class="close" data-dismiss aria-label="Schließen">${icon('close')}</button></div><fieldset><legend>Darstellung</legend><div class="appearance">${[['auto', 'Automatisch'], ['light', 'Hell'], ['dark', 'Dunkel']].map(([value, label]) => `<label><input type="radio" name="appearance" value="${value}" ${appearance === value ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></fieldset><a href="${this._expertPath()}" data-easy-hass-exit>Expertenansicht <span aria-hidden="true">↗</span></a><a href="/profile" data-easy-hass-exit>Mein Profil <span aria-hidden="true">↗</span></a><a id="restore-navigation" href="${escape(restore.pathname + restore.search)}" data-easy-hass-exit>Home-Assistant-Menü anzeigen <span aria-hidden="true">↗</span></a></section>`;
-    this.shadowRoot.querySelector('.sheet .close').focus();
+    return `<div class="sheet-heading"><h2 id="more-title">Mehr</h2><button type="button" class="close" data-sheet-close aria-label="Schließen">${icon('close')}</button></div><fieldset><legend>Darstellung</legend><div class="appearance">${[['auto', 'Automatisch'], ['light', 'Hell'], ['dark', 'Dunkel']].map(([value, label]) => `<label><input type="radio" name="appearance" value="${value}" ${appearance === value ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></fieldset><button type="button" class="settings-row" data-settings-page="settings"><span class="settings-row-label">Einstellungen</span>${icon('forward')}</button><a href="${this._expertPath()}" data-easy-hass-exit>Expertenansicht <span aria-hidden="true">↗</span></a><a href="/profile" data-easy-hass-exit>Mein Profil <span aria-hidden="true">↗</span></a><a id="restore-navigation" href="${escape(restore.pathname + restore.search)}" data-easy-hass-exit>Home-Assistant-Menü anzeigen <span aria-hidden="true">↗</span></a>`;
+  }
+  _renderAreaPicture(disabled) {
+    const draft = this._areaDraft || {};
+    const source = draft.picturePreview || pictureUrl(this._hass, draft.picture);
+    return `<div class="settings-picture">
+      ${source ? `<img class="settings-picture-preview" src="${escape(source)}" alt="Raumbild" draggable="false">`
+        : `<div class="settings-picture-placeholder" aria-label="Kein Raumbild">${icon('home')}</div>`}
+      <input id="settings-room-picture" type="file" accept="${AREA_IMAGE_ACCEPT}" hidden ${disabled ? 'disabled' : ''}>
+      <div class="settings-picture-actions"><button type="button" data-settings-picture ${disabled ? 'disabled' : ''} ${draft.pictureError ? 'aria-describedby="settings-picture-error"' : ''}>${source ? 'Bild ändern' : 'Bild hinzufügen'}</button>${source ? `<button type="button" data-settings-picture-remove aria-label="Raumbild entfernen" ${disabled ? 'disabled' : ''}>Entfernen</button>` : ''}</div>
+      ${draft.pictureLoading ? '<p class="settings-help" role="status">Bild wird geladen …</p>' : ''}
+      ${draft.pictureError ? `<p class="settings-error" id="settings-picture-error" role="alert">${escape(draft.pictureError)}</p>` : ''}
+    </div>`;
+  }
+  _renderSettings() {
+    const page = this._sheetPage;
+    const form = page === 'create' || page === 'edit';
+    const title = { settings: 'Einstellungen', rooms: 'Räume', create: 'Neuer Raum', edit: 'Raum bearbeiten', devices: 'Geräte', 'add-device': 'Gerät hinzufügen' }[page];
+    const backLabel = page === 'settings' ? 'Zurück zu Mehr' : page === 'rooms' ? 'Zurück zu Einstellungen'
+      : page === 'devices' ? 'Zurück zum Raum' : page === 'add-device' ? 'Zurück zu Geräte' : 'Zurück zur Raumliste';
+    const canEdit = this._hass?.user?.is_admin === true && this._hass?.connected === true;
+    const disabled = !canEdit || !!this._areaSave || !!this._areaOrderSave || !!this._deviceSave;
+    const help = !this._hass?.user?.is_admin ? 'Räume können nur von Administratoren bearbeitet werden.'
+      : this._hass?.connected !== true ? 'Keine Verbindung zu Home Assistant.' : '';
+    let content;
+    if (page === 'settings') {
+      content = `<button type="button" class="settings-row" data-settings-page="rooms"><span class="settings-row-label">Räume</span>${icon('forward')}</button>`;
+    } else if (page === 'rooms') {
+      let areas = listRegisteredAreas(this._registries);
+      if (this._areaOrderSave) {
+        const rank = new Map(this._areaOrderSave.ids.map((id, index) => [id, index]));
+        areas = areas.sort((a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity));
+      }
+      content = !this._registries ? `<p class="settings-help" role="status">${escape(this._registryError || 'Räume werden geladen …')}</p>`
+        : areas.length ? `<div class="settings-list${this._areaOrderSave ? ' is-order-saving' : ''}" role="list" aria-label="Zimmer" aria-busy="${!!this._areaOrderSave}">${areas.map(area => `<div class="settings-area-row" id="settings-row-${escape(area.id)}" data-settings-area-row="${escape(area.id)}" role="listitem"><button type="button" class="settings-drag" data-settings-drag="${escape(area.id)}" aria-label="${escape(area.name)} verschieben" aria-describedby="settings-order-hint" aria-pressed="false" aria-disabled="${disabled || areas.length < 2}" ${!canEdit || this._areaSave || areas.length < 2 ? 'disabled' : ''}>${icon('reorder')}</button><button type="button" class="settings-row" id="settings-area-${escape(area.id)}" data-settings-area="${escape(area.id)}" ${disabled ? 'disabled' : ''}><span class="settings-row-label">${escape(area.name)}${this._isRoomHidden(area.id) ? '<span class="settings-room-status">Ausgeblendet</span>' : ''}</span>${icon('forward')}</button></div>`).join('')}</div>`
+          : '<p class="settings-help">Noch keine Räume vorhanden.</p>';
+      content += `<span class="sr-only" id="settings-order-hint">Am Griff ziehen zum Sortieren. Mit der Tastatur Leertaste oder Enter drücken, mit den Pfeiltasten verschieben und erneut bestätigen. Escape bricht ab.</span><span class="sr-only" id="settings-order-status" role="status" aria-live="polite" aria-atomic="true">${escape(this._areaOrderStatus)}</span>${this._areaOrderError ? `<p class="settings-error" id="settings-order-error" role="alert">${escape(this._areaOrderError)}</p>` : ''}`;
+      content += `${help ? `<p class="settings-help" role="status">${escape(help)}</p>` : ''}<button type="button" class="settings-new" data-settings-new ${disabled ? 'disabled' : ''}>${icon('plus')}<span>Neu</span></button>`;
+    } else if (page === 'devices' || page === 'add-device') {
+      const area = listRegisteredAreas(this._registries).find(item => item.id === this._areaDraft?.id);
+      content = renderRoomDeviceSettings({
+        areaName: area?.name || this._areaDraft?.name, adding: page === 'add-device',
+        items: page === 'devices' ? this._roomAssignments() : listAssignableDevices(this._registries || {}, this._hass?.states || {}, this._areaDraft?.id),
+        query: this._deviceQuery, disabled, saving: this._deviceSave, error: this._deviceError,
+        orderingDisabled: disabled || !this._panelSettings || !!this._panelSettingsError,
+        handleDisabled: !canEdit || !this._panelSettings || !!this._panelSettingsError,
+        status: this._deviceOrderStatus, help: help || this._panelSettingsError,
+        missing: !!this._registries && !area, loading: !this._registries,
+      });
+    } else if (form) {
+      const missing = page === 'edit' && this._registries && !listRegisteredAreas(this._registries).some(area => area.id === this._areaDraft?.id);
+      const error = missing ? 'Dieser Raum ist nicht mehr vorhanden.' : this._areaError;
+      const settingsUnavailable = !this._panelSettings || !!this._panelSettingsError;
+      content = `<form class="settings-form" novalidate aria-busy="${!!this._areaSave || !!this._areaDraft?.pictureLoading}">
+        ${this._renderAreaPicture(disabled || missing)}
+        <div class="settings-field"><input class="settings-input" id="settings-room-name" name="name" type="text" value="${escape(this._areaDraft?.name)}" placeholder=" " maxlength="${AREA_NAME_MAX_LENGTH}" autocomplete="off" required ${disabled || missing ? 'disabled' : ''} ${error ? 'aria-invalid="true" aria-describedby="settings-error"' : ''}><label class="settings-floating-label" for="settings-room-name">Name</label></div>
+        ${page === 'edit' ? `<button type="button" class="settings-row" data-settings-page="devices" ${disabled || missing ? 'disabled' : ''}><span class="settings-row-label">Geräte</span><span class="settings-device-count">${this._roomAssignments().length}</span>${icon('forward')}</button>` : ''}
+        <label class="settings-visibility" for="settings-room-hidden"><span>In EasyHASS ausblenden</span><input id="settings-room-hidden" type="checkbox" role="switch" ${this._areaDraft?.hidden ? 'checked' : ''} ${disabled || missing || settingsUnavailable ? 'disabled' : ''}></label>
+        ${settingsUnavailable ? `<p class="settings-help" role="status">${escape(this._panelSettingsError || 'Anzeigeeinstellungen werden geladen …')}</p>` : ''}
+        ${error ? `<p class="settings-error" id="settings-error" role="alert">${escape(error)}</p>` : ''}${help ? `<p class="settings-help" role="status">${escape(help)}</p>` : ''}
+        <button type="submit" class="settings-new" data-settings-save ${disabled || missing || settingsUnavailable || this._areaDraft?.pictureLoading ? 'disabled' : ''}>${this._areaSave ? 'Wird gespeichert …' : page === 'create' ? 'Erstellen' : 'Speichern'}</button></form>`;
+    }
+    return `<div class="sheet-heading settings-heading"><button type="button" class="settings-back" data-settings-back aria-label="${backLabel}">${icon('back')}</button><h2 id="settings-title">${title}</h2></div>${content}`;
+  }
+  _renderSheet(replace = false) {
+    if (!this._sheetOpen) return;
+    if (this._deviceSorter?.active) {
+      if (this._sheetPage === 'devices' && this._canEditRoomDevices() && this._panelSettings && !this._panelSettingsError
+        && this._deviceSorter.matches(this._roomAssignments().map(item => item.key))) return;
+      this._deviceSorter.cancel();
+    }
+    if (this._areaSorter?.active) {
+      if (this._hass?.connected === true && this._hass?.user?.is_admin === true && this._sheetPage === 'rooms'
+        && this._areaSorter.matches(listRegisteredAreas(this._registries).map(area => area.id))) return;
+      this._areaSorter.cancel();
+    }
+    const more = this._sheetPage === 'more';
+    const markup = `<div class="sheet-backdrop" data-sheet-close></div><section class="sheet settings-sheet${more ? ' more-sheet' : ''}" role="dialog" aria-modal="true" aria-labelledby="${more ? 'more-title' : 'settings-title'}">${more ? this._renderMore() : this._renderSettings()}</section>`;
+    if (!replace && markup === this._lastSheetMarkup) return;
+    const overlay = this.shadowRoot.getElementById('overlay-root');
+    if (replace) {
+      this._sheetMotion?.cancel(); this._sheetMotion = null;
+      overlay.innerHTML = markup;
+    } else updateMarkup(overlay, markup);
+    const visibility = overlay.querySelector('#settings-room-hidden');
+    if (visibility) visibility.checked = !!this._areaDraft?.hidden;
+    this._lastSheetMarkup = markup;
+    const sheet = overlay.querySelector('.sheet'), active = this.shadowRoot.activeElement;
+    if (!sheet.contains(active) || active?.disabled) sheet.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
+  }
+  _sheetBack() {
+    if (this._sheetPage === 'add-device') { this._deviceError = null; this._showSheet('devices', '[data-settings-device-add]'); return; }
+    if (this._sheetPage === 'devices') { this._deviceError = null; this._showSheet('edit', '[data-settings-page="devices"]'); return; }
+    if (this._sheetPage === 'more') { this._closeSheet(); return; }
+    if (this._sheetPage === 'settings') { this._showSheet('more', '[data-settings-page="settings"]'); return; }
+    if (this._sheetPage === 'rooms') { this._showSheet('settings', '[data-settings-page="rooms"]'); return; }
+    const id = this._areaDraft?.id;
+    this._discardAreaDraft();
+    this._showSheet('rooms', id ? `[data-settings-area="${CSS.escape(id)}"]` : '[data-settings-new]');
+  }
+  _closeSheet() {
+    this._areaSorter?.cancel();
+    this._deviceSorter?.cancel();
+    this._discardAreaDraft();
+    this._sheetOpen = false; this._sheetPage = null;
+    this._sheetMotion?.cancel(); this._sheetMotion = null;
+    this.shadowRoot.getElementById('overlay-root').replaceChildren();
+    this.shadowRoot.getElementById('room-root').inert = false;
+    this._lockRoomBackground(!!this._presentedRoomId);
+    this.shadowRoot.querySelector('[data-tab="more"]')?.focus({ preventScroll: true });
+  }
+  _announceAreaOrder(text) {
+    this._areaOrderStatus = text;
+    const status = this.shadowRoot.getElementById('settings-order-status');
+    if (status) status.textContent = text;
+  }
+  _roomDeviceOrder(id) { return this._panelSettings?.room_device_order?.[id] || []; }
+  _roomAssignments() {
+    const areaId = this._areaDraft?.id;
+    const order = this._deviceSave?.areaId === areaId && this._deviceSave.keys
+      ? this._deviceSave.keys : this._roomDeviceOrder(areaId);
+    return listRoomAssignments(this._registries || {}, this._hass?.states || {}, areaId, order);
+  }
+  _canEditRoomDevices() {
+    return this._hass?.connected === true && this._hass?.user?.is_admin === true
+      && !this._deviceSave && !this._areaSave && !this._areaOrderSave
+      && listRegisteredAreas(this._registries).some(area => area.id === this._areaDraft?.id);
+  }
+  _announceDeviceOrder(text) {
+    this._deviceOrderStatus = text;
+    const status = this.shadowRoot.getElementById('settings-device-order-status');
+    if (status) status.textContent = text;
+  }
+  async _assignRoomDevice(key, remove) {
+    if (!this._canEditRoomDevices()) return;
+    const draft = this._areaDraft, areaId = draft.id;
+    const items = remove ? this._roomAssignments()
+      : listAssignableDevices(this._registries, this._hass?.states || {}, areaId);
+    const item = items.find(item => item.key === key);
+    if (!item || (remove && item.canRemove === false)) return;
+    const hass = this._hass, connection = hass.connection;
+    const request = this._deviceSave = { areaId, key };
+    this._deviceError = null; this._renderSheet();
+    let saved = false;
+    try {
+      await setDeviceRoom(hass, key, remove ? null : areaId);
+      saved = true;
+      const revision = this._registryRevision;
+      const registries = await loadRegistries(hass);
+      if (this._deviceSave !== request || !this.isConnected || connection !== this._hass?.connection) return;
+      if (revision === this._registryRevision) this._registries = registries;
+      if (this._areaDraft === draft && this._sheetOpen) {
+        this._announceDeviceOrder(remove ? `Die Raumzuordnung von ${item.name} wurde entfernt.` : `${item.name} wurde hinzugefügt.`);
+        if (!remove && this._sheetPage === 'add-device') this._showSheet('devices', '[data-settings-device-add]');
+      }
+    } catch (error) {
+      if (this._deviceSave === request && this.isConnected && connection === this._hass?.connection && this._areaDraft === draft) {
+        this._deviceError = saved ? 'Die Zuordnung wurde gespeichert. Die Geräteliste konnte noch nicht aktualisiert werden.'
+          : error?.message || 'Die Zuordnung konnte nicht gespeichert werden.';
+      }
+    } finally {
+      if (this._deviceSave === request) {
+        this._deviceSave = null;
+        if (this.isConnected) this._update();
+      }
+    }
+  }
+  async _saveDeviceOrder(keys) {
+    if (!this._canEditRoomDevices() || !this._panelSettings || this._panelSettingsError) return;
+    const draft = this._areaDraft, areaId = draft.id;
+    const hass = this._hass, connection = hass.connection;
+    const request = this._deviceSave = { areaId, keys: [...keys] };
+    this._deviceError = null;
+    this._announceDeviceOrder('Reihenfolge wird gespeichert.'); this._renderSheet();
+    try {
+      const settings = await setRoomDeviceOrder(hass, areaId, keys);
+      if (this._deviceSave !== request || !this.isConnected || connection !== this._hass?.connection) return;
+      this._acceptPanelSettings(settings);
+      if (this._areaDraft === draft) this._announceDeviceOrder('Reihenfolge gespeichert.');
+    } catch (error) {
+      if (this._deviceSave === request && this.isConnected && connection === this._hass?.connection && this._areaDraft === draft) {
+        this._deviceError = `Die Reihenfolge konnte nicht gespeichert werden. ${error?.message || 'Bitte erneut versuchen.'}`;
+        this._announceDeviceOrder('Sortieren fehlgeschlagen. Die bisherige Reihenfolge wurde wiederhergestellt.');
+      }
+    } finally {
+      if (this._deviceSave === request) {
+        this._deviceSave = null;
+        if (this.isConnected) this._update();
+      }
+    }
+  }
+  async _saveAreaOrder(ids) {
+    if (this._areaOrderSave || this._areaSave || this._deviceSave) return;
+    const hass = this._hass, connection = hass?.connection;
+    const request = this._areaOrderSave = { ids: [...ids] };
+    this._areaOrderError = null;
+    this._announceAreaOrder('Reihenfolge wird gespeichert.');
+    this._renderSheet();
+    try {
+      await reorderAreas(hass, ids);
+      if (this._areaOrderSave !== request || !this.isConnected || connection !== this._hass?.connection) return;
+      if (this._registries) {
+        const rank = new Map(ids.map((id, index) => [id, index]));
+        this._registries = { ...this._registries, areas: [...this._registries.areas]
+          .sort((a, b) => (rank.get(a.area_id || a.id) ?? Infinity) - (rank.get(b.area_id || b.id) ?? Infinity)) };
+      }
+      this._announceAreaOrder('Reihenfolge gespeichert.');
+    } catch (error) {
+      if (this._areaOrderSave === request && this.isConnected && connection === this._hass?.connection) {
+        this._areaOrderError = `Die Reihenfolge konnte nicht gespeichert werden. ${error?.message || 'Bitte erneut versuchen.'}`;
+        this._announceAreaOrder('Sortieren fehlgeschlagen. Die bisherige Reihenfolge wurde wiederhergestellt.');
+      }
+    } finally {
+      if (this._areaOrderSave === request) {
+        this._areaOrderSave = null;
+        if (this.isConnected) this._update();
+      }
+    }
+  }
+  _cleanupAreaUpload(draft) {
+    const upload = draft?.uploadedPicture;
+    if (!upload) return;
+    draft.uploadedPicture = null;
+    // The model only deletes this connection's own uploads after checking that
+    // no area references them. Existing and shared room photos are never deleted.
+    deleteUploadedAreaImage(draft.uploadHass, upload.id).catch(() => {});
+  }
+  _clearAreaPicture(draft) {
+    if (draft.picturePreview) URL.revokeObjectURL(draft.picturePreview);
+    draft.picturePreview = null; draft.pictureFile = null;
+    this._cleanupAreaUpload(draft);
+  }
+  _discardAreaDraft() {
+    const draft = this._areaDraft;
+    this._areaDraft = null; this._areaError = null;
+    this._deviceQuery = ''; this._deviceError = null; this._deviceOrderStatus = '';
+    if (!draft) return;
+    draft.pictureVersion = (draft.pictureVersion || 0) + 1;
+    if (draft.picturePreview) URL.revokeObjectURL(draft.picturePreview);
+    draft.picturePreview = null;
+    // A pending save owns its upload until its last request has settled.
+    if (this._areaSave !== draft) this._cleanupAreaUpload(draft);
+  }
+  async _selectAreaPicture(file) {
+    const draft = this._areaDraft;
+    if (!draft || this._areaSave) return;
+    const version = draft.pictureVersion = (draft.pictureVersion || 0) + 1;
+    let preview;
+    try {
+      validateAreaImageFile(file);
+      draft.pictureError = null; draft.pictureLoading = true;
+      this._renderSheet();
+      preview = URL.createObjectURL(file);
+      const image = new Image(); image.src = preview;
+      await image.decode();
+      if (!this.isConnected || this._areaDraft !== draft || draft.pictureVersion !== version) return;
+      this._clearAreaPicture(draft);
+      draft.pictureFile = file; draft.picturePreview = preview; draft.pictureDirty = true;
+      preview = null;
+    } catch (error) {
+      if (this._areaDraft === draft && draft.pictureVersion === version) {
+        draft.pictureError = error?.name === 'EncodingError' ? 'Dieses Bild konnte nicht gelesen werden. Bitte ein anderes Bild auswählen.'
+          : error?.message || 'Dieses Bild konnte nicht geladen werden.';
+      }
+    } finally {
+      if (preview) URL.revokeObjectURL(preview);
+      if (this._areaDraft === draft && draft.pictureVersion === version) {
+        draft.pictureLoading = false;
+        this._renderSheet();
+      }
+    }
+  }
+  async _saveArea() {
+    const draft = this._areaDraft;
+    if (!draft || this._areaSave || draft.pictureLoading || !this._panelSettings || this._panelSettingsError) return;
+    const hass = this._hass, connection = hass?.connection;
+    const creating = !draft.id;
+    let areaWritten = false;
+    this._areaSave = draft; this._areaError = null;
+    this._renderSheet();
+    try {
+      const name = validateAreaName(draft.name);
+      // A stale, untouched name must not undo another client's rename.
+      const changes = creating || name !== draft.originalName ? { name } : {};
+      if (draft.uploadedPicture && draft.uploadHass?.connection !== connection) this._cleanupAreaUpload(draft);
+      if (draft.pictureFile && !draft.uploadedPicture) {
+        draft.uploadHass = hass;
+        draft.uploadedPicture = await uploadAreaImage(hass, draft.pictureFile);
+      }
+      if (this._areaSave !== draft || this._areaDraft !== draft || !this.isConnected || connection !== this._hass?.connection) return;
+      if (draft.pictureDirty) changes.picture = draft.uploadedPicture?.url || null;
+      const existing = listRegisteredAreas(this._registries).find(area => area.id === draft.id);
+      // A visibility-only edit must not rewrite native HA area data.
+      const nativeChanged = !existing || Object.keys(changes).length > 0;
+      const area = nativeChanged ? await (draft.id ? updateArea(this._hass, draft.id, changes)
+        : createArea(this._hass, changes.name, draft.pictureDirty ? { picture: changes.picture } : {})) : existing;
+      areaWritten = nativeChanged;
+      if (this._areaSave !== draft || !this.isConnected || connection !== this._hass?.connection) return;
+      const id = area.area_id || area.id;
+      // Retain a newly created ID if the separate visibility save needs a retry.
+      draft.id = id; draft.name = area.name; draft.originalName = area.name;
+      draft.picture = area.picture || null; draft.pictureDirty = false;
+      if (creating && this._areaDraft === draft) this._sheetPage = 'edit';
+      if (id && this._registries) {
+        const areas = [...this._registries.areas];
+        const index = areas.findIndex(item => (item.area_id || item.id) === id);
+        if (index < 0) areas.push(area); else areas[index] = area;
+        this._registries = { ...this._registries, areas };
+      }
+      if ((draft.hiddenDirty || creating) && draft.hidden !== this._isRoomHidden(id)) {
+        await setRoomHidden(this._hass, id, !!draft.hidden);
+        if (this._areaSave !== draft || !this.isConnected || connection !== this._hass?.connection) return;
+        // The subscription supplies ordered snapshots to every client, including this one.
+        // Never replace a newer pushed snapshot with an older command response.
+      }
+      if (this._areaDraft === draft && this._sheetOpen) {
+        this._discardAreaDraft();
+        this._showSheet('rooms');
+      }
+      this._toast(creating ? 'Raum angelegt.' : 'Raum gespeichert.');
+    } catch (error) {
+      if (this._areaSave === draft && this._areaDraft === draft && this.isConnected && connection === this._hass?.connection) {
+        this._areaError = areaWritten ? 'Der Raum ist gespeichert, die Sichtbarkeit konnte aber nicht gespeichert werden. Bitte erneut versuchen.'
+          : ['name_exists', 'name_already_in_use', 'already_in_use'].includes(error?.code) || /already (?:exists|in use)/i.test(error?.message || '')
+            ? 'Ein Raum mit diesem Namen ist bereits vorhanden.' : error?.message || 'Der Raum konnte nicht gespeichert werden.';
+      }
+    } finally {
+      if (this._areaDraft !== draft) this._cleanupAreaUpload(draft);
+      if (this._areaSave === draft) {
+        this._areaSave = null;
+        if (this.isConnected) {
+          this._update();
+          if (connection === this._hass?.connection && this._areaDraft === draft && this._areaError) this.shadowRoot.getElementById('settings-room-name')?.focus({ preventScroll: true });
+        }
+      }
+    }
   }
   _dismiss() {
+    if (this._weatherOpen) { this._closeWeather(); return; }
+    if (this._inlineControls?.active) { this._inlineControls.cancel(); return; }
     if (this._gesture || this._adjustment || this._closingAdjustment) {
       this._cancelGesture(); this._finishClosingAdjustment(); return;
     }
     if (this._sheetOpen) {
-      this._sheetOpen = false;
-      this.shadowRoot.getElementById('overlay-root').innerHTML = '';
-      this.shadowRoot.getElementById('app-content').inert = false;
-      this.shadowRoot.querySelector('[data-tab="more"]').focus();
-      return;
+      this._sheetBack(); return;
     }
     if (this._presentedRoomId) this._returnHome();
   }

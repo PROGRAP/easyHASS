@@ -40,7 +40,7 @@ try {
     await expect(control('light', 'Küche')).toHaveAttribute('aria-pressed', 'true');
     const p = await hold('light', 'Küche');
     await page.mouse.move(374, p.y, { steps: 5 });
-    await expect(page.locator('#adjust-value')).toHaveText('100 %'); await page.mouse.up();
+    await expect(page.locator('#adjust-value')).toHaveText('An'); await page.mouse.up();
     await expect.poll(async () => (await state(kitchen.entity_id)).attributes.brightness).toBe(255);
   });
   await check('Unknown light brightness stays unknown; hold/release never switches it off', async () => {
@@ -50,7 +50,7 @@ try {
     await ha.api(`/api/states/${living.entity_id}`, { state: 'on', attributes: attrs });
     await expect.poll(() => page.locator('easy-hass-panel').evaluate((el, id) => el.hass.states[id].attributes.brightness ?? null, living.entity_id)).toBe(null);
     const before = await state(living.entity_id); await hold('light');
-    await expect(page.locator('#adjust-value')).toHaveText('— %'); await page.mouse.up();
+    await expect(page.locator('#adjust-value')).toHaveText('—'); await page.mouse.up();
     assert.equal((await state(living.entity_id)).last_updated, before.last_updated);
     await service('light', 'turn_on', living.entity_id, { brightness_pct: 55 });
   });
@@ -59,7 +59,7 @@ try {
     await ha.api(`/api/states/${cover.entity_id}`, { state: 'open', attributes: attrs });
     await expect.poll(() => page.locator('easy-hass-panel').evaluate((el, id) => el.hass.states[id].attributes.current_position ?? null, cover.entity_id)).toBe(null);
     const before = await state(cover.entity_id); await hold('cover');
-    await expect(page.locator('#adjust-value')).toHaveText('— %'); await page.mouse.up();
+    await expect(page.locator('#adjust-value')).toHaveText('—'); await page.mouse.up();
     assert.equal((await state(cover.entity_id)).last_updated, before.last_updated);
     await service('cover', 'set_cover_position', cover.entity_id, { position: 60 });
   });

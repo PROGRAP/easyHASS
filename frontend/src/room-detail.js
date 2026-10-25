@@ -1,5 +1,6 @@
-import { icon } from './icons.js';
+import { icon, coverIcon, lightIcon } from './icons.js';
 import { pictureUrl, entityControlTarget } from './ha-model.js';
+import { controlValueLabel } from './control-label.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const numeric = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
@@ -8,7 +9,7 @@ const sections = [
   ['light', 'Licht', ['light']], ['cover', 'Beschattung', ['cover']],
   ['switch', 'Schalter', ['switch', 'input_boolean']], ['climate', 'Raumklima', ['climate', 'fan', 'humidifier']],
   ['media', 'Unterhaltung', ['media_player', 'remote']], ['vacuum', 'Reinigung', ['vacuum', 'lawn_mower']],
-  ['sensor', 'Sensoren', ['sensor', 'binary_sensor']], ['other', 'Weitere Geräte', []],
+  ['other', 'Weitere Geräte', []],
 ];
 
 function stateLabel(entity, hass) {
@@ -19,14 +20,6 @@ function stateLabel(entity, hass) {
     if (entity.state === 'closing') return 'Schließt';
     return entity.position === 0 || entity.state === 'closed' ? 'Geschlossen'
       : entity.position === 100 ? 'Offen' : entity.position !== null ? `${entity.position} % geöffnet` : 'Offen';
-  }
-  if (entity.domain === 'sensor' && numeric(entity.state)) return `${number(entity.state)}${entity.attributes.unit_of_measurement ? ` ${entity.attributes.unit_of_measurement}` : ''}`;
-  if (entity.domain === 'binary_sensor') {
-    const active = entity.state === 'on';
-    if (['door', 'window', 'opening', 'garage_door'].includes(entity.deviceClass)) return active ? 'Offen' : 'Geschlossen';
-    if (['motion', 'occupancy', 'presence'].includes(entity.deviceClass)) return active ? 'Erkannt' : 'Keine Aktivität';
-    if (entity.deviceClass === 'moisture') return active ? 'Feuchtigkeit erkannt' : 'Trocken';
-    return active ? 'Aktiv' : 'Inaktiv';
   }
   if (entity.domain === 'climate' && numeric(entity.attributes.current_temperature)) {
     return `${number(entity.attributes.current_temperature)} ${hass?.config?.unit_system?.temperature || '°'}`;
@@ -59,8 +52,37 @@ function displayName(name, roomName) {
   return short;
 }
 
+function inlineControl(entity, roomName, hass, group, pending) {
+  const kind = entity.domain, id = escape(entity.id), name = escape(entity.name);
+  const state = entityControlTarget(entity)[kind];
+  const adjustable = kind === 'light' ? entity.canDim : entity.canSetPosition;
+  const level = kind === 'light' ? entity.brightness : entity.position;
+  const known = entity.available && numeric(level);
+  const value = known ? Math.max(0, Math.min(100, Number(level))) : null;
+  const unavailable = !entity.available || hass?.connected === false;
+  const disabled = unavailable || pending;
+  const status = !entity.available ? '—' : kind === 'light'
+    ? entity.state === 'on' ? 'An' : entity.state === 'off' ? 'Aus' : '—'
+    : ({ open: 'Auf', closed: 'Zu', opening: 'Öffnet', closing: 'Schließt' })[entity.state] || '—';
+  const output = adjustable ? controlValueLabel(kind, value) : status;
+  const fill = adjustable ? value ?? 0 : entity.available && (kind === 'light' ? state.isOn : state.isOpen) ? 100 : 0;
+  const action = kind === 'light' ? state.isOn ? 'ausschalten' : 'einschalten'
+    : state.moving ? 'stoppen' : state.isOpen ? 'schließen' : 'öffnen';
+  const valueText = !entity.available ? entity.state === 'unknown' ? 'Wert unbekannt' : 'Nicht verfügbar'
+    : value === null ? `${kind === 'light' ? 'Helligkeit' : 'Öffnung'} unbekannt`
+      : controlValueLabel(kind, value);
+  return `<article class="device-row inline-control ${kind}${unavailable ? ' is-unavailable' : ''}${pending ? ' is-pending' : ''}${adjustable ? '' : ' is-binary'}" data-entity-row="${id}" data-inline-control="${id}"${pending ? ' aria-busy="true"' : ''}>
+    <div class="inline-fill" style="width: ${fill}%" aria-hidden="true"></div>
+    <button type="button" class="inline-icon" data-inline-toggle="${id}" data-inline-kind="${kind}" aria-label="${name}: ${kind === 'light' ? 'Licht' : 'Rollladen'} ${action}" ${kind === 'light' ? `aria-pressed="${state.isOn}"` : ''} ${disabled || !state.canToggle ? 'disabled' : ''}>${kind === 'light' ? lightIcon(adjustable ? value : entity.available && state.isOn ? 100 : 0) : coverIcon(value ?? (entity.state === 'closed' ? 0 : null))}</button>
+    <span class="inline-title"><span class="device-name" title="${name}">${escape(displayName(entity.name, roomName))}</span>${group ? `<span class="device-state">${escape(group)}</span>` : ''}</span>
+    <output class="inline-value" aria-live="off">${escape(output)}</output>
+    ${adjustable ? `<input type="range" min="0" max="100" step="1" value="${value ?? 50}" data-inline-range="${id}" data-inline-kind="${kind}" aria-label="${name}: ${kind === 'light' ? 'Helligkeit' : 'Öffnung'} in Prozent" aria-valuetext="${escape(valueText)}" ${disabled ? 'disabled' : ''}>` : ''}
+    ${kind === 'light' ? `<button type="button" class="inline-details" data-inline-details="${id}" data-inline-kind="light" aria-label="${name}: Details öffnen"${adjustable ? ' aria-description="Seitlich ziehen, um die Helligkeit zu ändern."' : ''} ${disabled ? 'disabled' : ''}></button>` : ''}
+  </article>`;
+}
+
 /** Render real HA entities; action callbacks are scoped to the actual entity/group. */
-export function renderRoomDetail(room, devices, hass, { reading, control, current = true, status = '' }) {
+export function renderRoomDetail(room, devices, hass, { reading, current = true, status = '', pending = () => false, customOrder = false }) {
   if (!room) return `<header class="detail-header"><button class="room-back" data-room-back>${icon('back')}<span>Zuhause</span></button><h1 tabindex="-1">Raum nicht mehr vorhanden</h1></header><div class="empty-state">Dieser Raum ist in Home Assistant nicht mehr vorhanden.</div>`;
   const picture = pictureUrl(hass, room.picture);
   const buckets = new Map(sections.map(([id]) => [id, []]));
@@ -70,18 +92,16 @@ export function renderRoomDetail(room, devices, hass, { reading, control, curren
     const state = stateLabel(entity, hass);
     const group = entity.isGroup ? entity.isSharedGroup ? 'Gruppe · mehrere Räume' : `Gruppe · ${entity.memberCount} Geräte` : '';
     const adjustable = ['light', 'cover'].includes(entity.domain);
+    if (adjustable) return inlineControl(entity, room.name, hass, group, pending(entity.id, entity.domain));
     const toggle = ['switch', 'fan', 'input_boolean'].includes(entity.domain);
-    const sensor = ['sensor', 'binary_sensor'].includes(entity.domain);
     const label = group ? `${state} · ${group}` : state;
     let action;
-    if (adjustable) action = control(entityControlTarget(entity), entity.domain, entity.id);
-    else if (toggle) action = `<button class="round-control switch-control ${entity.state === 'on' ? 'is-on' : ''}" data-toggle-entity="${id}" aria-label="${escape(entity.name)} ${entity.state === 'on' ? 'ausschalten' : 'einschalten'}" aria-pressed="${entity.state === 'on'}" ${!entity.available || hass?.connected === false ? 'disabled' : ''}>${icon('power')}</button>`;
-    else if (sensor) action = `<span class="device-reading">${escape(state)}</span>`;
+    if (toggle) action = `<button class="round-control switch-control ${entity.state === 'on' ? 'is-on' : ''}" data-toggle-entity="${id}" aria-label="${escape(entity.name)} ${entity.state === 'on' ? 'ausschalten' : 'einschalten'}" aria-pressed="${entity.state === 'on'}" ${!entity.available || hass?.connected === false ? 'disabled' : ''}>${icon('power')}</button>`;
     else action = `<span class="device-chevron" aria-hidden="true">${icon('forward')}</span>`;
-    return `<article class="device-row ${sensor ? 'sensor-row' : ''}" data-entity-row="${id}">
+    return `<article class="device-row" data-entity-row="${id}">
       <button type="button" class="device-info" data-more-info="${id}" aria-label="${escape(entity.name)}: Details öffnen">
         ${!adjustable && !toggle ? `<span class="device-symbol" aria-hidden="true">${icon(deviceIcon(entity))}</span>` : ''}
-        <span class="device-copy"><span class="device-name" title="${escape(entity.name)}">${escape(displayName(entity.name, room.name))}</span>${sensor && !group ? '' : `<span class="device-state">${escape(sensor ? group : label)}</span>`}</span>
+        <span class="device-copy"><span class="device-name" title="${escape(entity.name)}">${escape(displayName(entity.name, room.name))}</span><span class="device-state">${escape(label)}</span></span>
       </button>${action}</article>`;
   };
   return `<div class="room-detail" data-room-detail="${escape(room.id)}" ${current ? 'data-current-room' : ''}>
@@ -92,6 +112,6 @@ export function renderRoomDetail(room, devices, hass, { reading, control, curren
       </div>
     </header>
     ${status}
-    ${devices.length ? sections.filter(([id]) => buckets.get(id).length).map(([id, label]) => `<section class="device-section" aria-labelledby="devices-${escape(room.id)}-${id}"><h2 id="devices-${escape(room.id)}-${id}">${label}</h2><div class="device-list">${buckets.get(id).map(row).join('')}</div></section>`).join('') : '<div class="empty-state"><p>In diesem Raum sind noch keine Geräte eingerichtet.</p></div>'}
+    ${devices.length ? customOrder ? `<section class="device-section" aria-labelledby="devices-${escape(room.id)}-ordered"><h2 id="devices-${escape(room.id)}-ordered">Geräte</h2><div class="device-list">${devices.map(row).join('')}</div></section>` : sections.filter(([id]) => buckets.get(id).length).map(([id, label]) => `<section class="device-section" aria-labelledby="devices-${escape(room.id)}-${id}"><h2 id="devices-${escape(room.id)}-${id}">${label}</h2><div class="device-list">${buckets.get(id).map(row).join('')}</div></section>`).join('') : '<div class="empty-state"><p>In diesem Raum sind noch keine steuerbaren Geräte eingerichtet.</p></div>'}
   </div>`;
 }

@@ -1,6 +1,6 @@
 # Easy-Hass installieren
 
-**Version 0.2.0-alpha.2 · Stand 25. Oktober 2026**
+**Version 0.2.0-alpha.3 · Stand 25. Oktober 2026**
 
 **Alpha / Vorabversion:** Diese Ausgabe ist für frühe Tests gedacht und kann
 Fehler oder noch unvollständiges Verhalten enthalten. Vor der Installation
@@ -33,7 +33,7 @@ in den HACS-Standardkatalog wird damit nicht vorausgesetzt.
    **Herunterladen** wählen. Bei einem bereits geladenen Repository über das
    Drei-Punkte-Menü **Erneut herunterladen / Redownload** öffnen.
 5. Im Download-Dialog **Andere Version benötigt? / Need a different version?**
-   öffnen und die Vorabversion **v0.2.0-alpha.2** auswählen. Die Auswahl setzt
+   öffnen und die Vorabversion **v0.2.0-alpha.3** auswählen. Die Auswahl setzt
    voraus, dass dieser GitHub-Prerelease veröffentlicht wurde.
 6. Mit dem Neustart und der Aktivierung in den folgenden Abschnitten fortfahren.
 
@@ -59,7 +59,7 @@ benötigt. Eine npm-Installation ist für diesen Schritt nicht erforderlich.
 npm run package
 ```
 
-Das erzeugt `dist/easy-hass-0.2.0-alpha.2.zip`. Dieses ZIP direkt im
+Das erzeugt `dist/easy-hass-0.2.0-alpha.3.zip`. Dieses ZIP direkt im
 HA-Konfigurationsverzeichnis entpacken. Alternativ den vollständigen Ordner
 `custom_components/easy_hass/` dorthin kopieren. Die Struktur muss so aussehen:
 
@@ -115,7 +115,19 @@ mit sichtbarem HA-Menü direkt `/easy-hass?easy_hass_navigation=show` öffnen.
 ## 4. Räume und Geräte in HA pflegen
 
 Raumnamen, Reihenfolge und Bilder werden aus Home Assistant übernommen.
-Räume und ihre Fotos lassen sich in der normalen HA-Raumverwaltung bearbeiten.
+Unter **Mehr → Einstellungen → Räume** lassen sich Räume anlegen und bearbeiten.
+Im Raumformular kannst du den Namen ändern sowie über **Bild ändern** oder
+**Bild hinzufügen** eine JPG-, PNG- oder GIF-Datei bis 10 MB auswählen. Die
+Vorschau ist zunächst lokal; **Speichern** übernimmt Namen und Bild in Home
+Assistant. **Entfernen** nimmt das Bild nach dem Speichern vom Raum. Zurückgehen
+ohne Speichern verwirft die Auswahl. Diese Änderungen benötigen ein Administratorkonto.
+In der Raumliste kannst du einen Raum am linken Ziehgriff nach oben oder unten
+verschieben. Die Reihenfolge wird beim Loslassen automatisch in Home Assistant
+gespeichert und auch auf der Easy-Hass-Startseite verwendet. Der Pfeil rechts
+öffnet weiterhin die Raum-Bearbeitung. Mit der Tastatur: Griff fokussieren,
+Leertaste oder Enter zum Aufnehmen, Pfeiltasten zum Verschieben, erneut bestätigen;
+Escape bricht ab.
+Räume und ihre Fotos lassen sich weiterhin in der normalen HA-Raumverwaltung bearbeiten.
 Geräte unter **Einstellungen → Geräte & Dienste** dem passenden Raum zuordnen.
 Eine explizite Raumzuordnung der Entity hat Vorrang vor der des Geräts.
 

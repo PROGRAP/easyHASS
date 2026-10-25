@@ -130,12 +130,60 @@ Die fünf optionalen Raumfotos müssen für die vollständige Foto-Prüfung vorh
 Browserprüfungen ergänzen diesen API-Test: Der API-Test allein beweist keine
 Darstellung oder Touch-Geste in der Oberfläche.
 
+`npm run test:settings` prüft die Navigation **Mehr → Einstellungen → Räume**,
+Anlegen und Umbenennen über die Oberfläche, Persistenz nach Neuladen,
+Duplikatfehler sowie Fokusführung und schmale Displays in Hell/Dunkel.
+Die Bildprüfungen decken lokale Vorschau, ungültige Dateien, Upload zusammen mit
+Namensänderung, Neuladen, Abbrechen und Entfernen eines Raumbilds ab.
+Es wird ausschließlich ein eindeutig benannter Testraum erstellt und im
+Cleanup anhand seiner eigenen Area-ID entfernt. Eigene Testbild-Uploads werden
+anhand ihrer bestätigten IDs bereinigt, sofern kein Raum sie referenziert.
+Bestehende Räume, Bilder, Geräte und
+Gerätezustände bleiben unverändert. Bericht und Screenshots liegen unter
+`test-results/browser-settings.json` beziehungsweise `test-results/settings-*.png`.
+
+`npm run test:room-order` prüft Maus-, Touch- und Tastatursortierung,
+Persistenz nach Neuladen, die Reihenfolge auf der Startseite, Abbruch,
+fehlgeschlagenes Speichern und automatisches Scrollen in einer längeren Liste.
+Der Test stellt abschließend die ursprüngliche HA-Reihenfolge wieder her und
+entfernt ausschließlich seine eigenen temporären Räume. Bericht:
+`test-results/browser-room-order.json`.
+
+`npm run test:room-devices` prüft die Gerätezuordnung und Sortierung in einem
+eigenen temporären Testraum. Dafür werden ausschließlich bekannte lokale
+Fixture-Geräte kurz umgeordnet und anschließend mit ihren ursprünglichen
+Area-IDs wiederhergestellt. Geprüft werden Hinzufügen/Entfernen, Persistenz,
+Reihenfolge in der Raumansicht und die Trennung von Sensorgeräten und
+Sensorzeilen. Geräteaktionen werden im Test abgefangen. Bericht:
+`test-results/browser-room-devices.json`.
+
+`npm run test:room-visibility` prüft das Ausblenden und Wiedereinblenden eines
+eigenen Testraums, Abbrechen, Persistenz nach Neuladen, direkte Raumlinks,
+Raumwechsel, Synchronisierung zwischen zwei Clients und fehlgeschlagenes
+Speichern. Bestehende Räume werden nicht ausgeblendet. Bericht und Screenshots:
+`test-results/browser-room-visibility.json` und `test-results/room-visibility-*.png`.
+
+`npm run test:weather` prüft die Wetterkarte gegen die echte lokale Wetter-Entity
+und vergleicht die angezeigten Werte mit den nativen
+`weather/subscribe_forecast`-Abonnements. Der Test steuert keine Geräte und ändert
+keine HA-Wetterzustände. Er prüft den Chip-Morph in beide Richtungen, Scrollen,
+Fokusführung, Hell/Dunkel und reduzierte Bewegung. Fehlerfälle werden ausschließlich
+im isolierten Browser simuliert. Bericht: `test-results/browser-weather.json`.
+
+Die Wetterkarte verwendet den Wetterchip als Quelle, zeigt nur tatsächlich
+vorhandene Messwerte und abonniert unterstützte Stunden-/Tagesprognosen nur während
+sie geöffnet ist. Tagesgrenzen folgen der HA-Zeitzone; Einheiten kommen von der
+Wetter-Entity. Eine Regenmenge für die nächsten 24 Stunden erscheint nur bei einer
+vollständigen, lückenlosen Stundenprognose mit 24 Niederschlagswerten;
+sonst wird eine vorhandene Tagesmenge als „Heute“ angezeigt.
+
 Die vorhandenen Backendtests lassen sich gegen die im Container installierten
 echten HA-Klassen ausführen:
 
 ```sh
 docker cp tests/test_integration.py easy-hass-local:/tmp/test_integration.py
-docker exec -e PYTHONPATH=/config -w /tmp easy-hass-local python -m unittest test_integration -v
+docker cp tests/test_settings.py easy-hass-local:/tmp/test_settings.py
+docker exec -e PYTHONPATH=/config -w /tmp easy-hass-local python -m unittest test_integration test_settings -v
 ```
 
 Für weitere lokale Integrationsprüfungen stellt `scripts/ha-client.mjs` einen

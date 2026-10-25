@@ -16,6 +16,5 @@ jobs:
         with:
           category: integration
           # This alpha is a custom repository, not a default-catalog submission.
-          # Private design screenshots are excluded; no project-wide license
-          # has been selected. Bundled third-party licenses remain included.
-          ignore: images license
+          # Private design screenshots are excluded.
+          ignore: images

@@ -25,6 +25,7 @@ from .const import (
     PANEL_PATH,
     STATIC_URL,
 )
+from .settings import async_activate, async_deactivate
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 FRONTEND_DIRECTORY = Path(__file__).parent / "frontend"
@@ -112,6 +113,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         registration.entry_id = entry.entry_id
         registration.panel = hass.data[frontend.DATA_PANELS][PANEL_PATH]
+        async_activate(hass, entry)
 
     return True
 
@@ -125,6 +127,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async with registration.lock:
         if registration.entry_id != entry.entry_id:
             return True
+
+        async_deactivate(hass, entry)
 
         # Check identity: never remove a replacement owned by another component.
         current_panel = hass.data.get(frontend.DATA_PANELS, {}).get(PANEL_PATH)

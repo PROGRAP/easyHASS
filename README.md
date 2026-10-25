@@ -2,7 +2,7 @@
 
 Eine reduzierte, raumorientierte Oberfläche für Home Assistant.
 
-**Aktuelle Vorabversion: `0.2.0-alpha.2` · Noch keine stabile Veröffentlichung.**
+**Aktuelle Vorabversion: `0.2.0-alpha.3` · Noch keine stabile Veröffentlichung.**
 Die Alpha wurde mit Home Assistant 2026.10.2 in einer getrennten Testinstallation
 geprüft. Andere HA-Versionen, physische Geräte und native Companion-Apps sind
 noch nicht vollständig abgedeckt.
@@ -15,8 +15,11 @@ die vorhandene Home-Assistant-Anmeldung und die bestehenden Berechtigungen.
 
 - Räume mit Foto, Temperatur, Luftfeuchtigkeit und kompakten Licht-/Rollladenreglern.
 - Raumkarten vergrößern sich zur Detailansicht; horizontal wischen wechselt den Raum.
-- Einzelne Geräte nach Typ, Gerätegruppen ohne doppelte Darstellung ihrer Mitglieder.
-- Kurz tippen schaltet; lang halten und ziehen dimmt Licht oder verändert die Rollladenposition.
+- Raumverwaltung mit Fotoauswahl, Ausblenden und Drag & Drop für die Raumreihenfolge.
+- Geräte pro Raum zuweisen und sortieren; Gerätegruppen ohne doppelte Darstellung ihrer Mitglieder.
+- Licht und Rollläden direkt durch seitliches Ziehen einstellen; in der Übersicht auch durch langes Halten.
+- In Raumdetails öffnet ein Tipp auf den Lichtbalken die Gerätedetails, das Glühbirnen-Icon schaltet.
+- Wetterdetailansicht mit stündlicher und täglicher Vorhersage aus Home Assistant.
 - Helle, dunkle und automatische Darstellung, Tastaturbedienung und reduzierte Bewegung.
 - Fotoheader mit automatisch berechneter Durchschnittsfarbe des sichtbaren Bildausschnitts.
 - Rückkehr zur normalen HA-Oberfläche über „Mehr → Expertenansicht“.
@@ -31,7 +34,7 @@ Es werden keine Beispielräume oder Geräte auf dem Server angelegt.
 1. In HACS unter **⋮ → Benutzerdefinierte Repositories**
    `https://github.com/prograp/easyHASS` mit Typ **Integration** hinzufügen.
 2. **Easy-Hass** öffnen und herunterladen. Im Versionsdialog die Vorabversion
-   **`v0.2.0-alpha.2`** wählen; bei Bedarf „Need a different version?“ öffnen.
+   **`v0.2.0-alpha.3`** wählen; bei Bedarf „Need a different version?“ öffnen.
 3. Home Assistant neu starten.
 4. **Einstellungen → Geräte & Dienste → Integration hinzufügen → Easy-Hass**.
 5. Den zusätzlichen Menüpunkt öffnen. Für die erste Prüfung mit sichtbarem
@@ -45,7 +48,7 @@ als Bestandteil des offiziellen Standardkatalogs angeboten.
 
 ## Manuell installieren
 
-Das ZIP `easy-hass-0.2.0-alpha.2.zip` aus den
+Das ZIP `easy-hass-0.2.0-alpha.3.zip` aus den
 [GitHub-Releases](https://github.com/prograp/easyHASS/releases) im
 HA-Konfigurationsverzeichnis entpacken. Es enthält
 `custom_components/easy_hass/`. Anschließend neu starten und die Integration
@@ -74,5 +77,20 @@ nicht zum Repository.
 - [Räume, Geräte und Gruppen im Datenmodell](docs/HA-MODEL.md)
 - [Fehler melden](https://github.com/prograp/easyHASS/issues)
 
-Die mitgelieferten Heroicons und die Schrift Inter behalten ihre jeweiligen
-Lizenz- und Quellenangaben unter `frontend/src/assets/` und im Frontend-Build.
+## Lizenz
+
+Copyright (C) 2026 PROGRAP GmbH.
+
+Easy-Hass steht unter der **GNU General Public License, Version 3**
+(`GPL-3.0-only`). Den vollständigen Lizenztext findest du in [LICENSE](LICENSE).
+Eine identische Kopie unter `custom_components/easy_hass/LICENSE` wird bei der
+Installation über HACS und im Installations-ZIP mitgeliefert.
+
+Der vollständige Quellcode einschließlich der Build-Skripte ist in diesem
+Repository verfügbar. Für eine veröffentlichte Version verwende den zugehörigen
+Release-Tag; die Build-Anleitung steht oben unter „Entwicklung“.
+
+Die mitgelieferten Heroicons (MIT) und die Schrift Inter (SIL Open Font License 1.1)
+behalten ihre jeweiligen Lizenzen. Die Lizenz- und Quellenangaben liegen unter
+`frontend/src/assets/`, im Frontend-Build sowie für die Heroicons-basierten
+Integrationslogos unter `custom_components/easy_hass/brand/`.

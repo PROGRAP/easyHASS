@@ -35,14 +35,14 @@ from custom_components.easy_hass.const import (
 )
 
 
-def make_entry(unique_id=DOMAIN):
+def make_entry(unique_id=DOMAIN, options=None):
     """Construct a real config entry without starting HA bootstrap."""
     return ConfigEntry(
         data={},
         discovery_keys=MappingProxyType({}),
         domain=DOMAIN,
         minor_version=1,
-        options={},
+        options=options or {},
         source="user",
         subentries_data=None,
         title=NAME,
@@ -140,11 +140,16 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(panel.config["_panel_custom"]["embed_iframe"])
         routes = tuple(self.hass.http.app.router.routes())
         self.assertTrue(routes)
+        commands = self.hass.data["websocket_api"].copy()
+        self.assertIn("easy_hass/settings/get", commands)
+        self.assertIn("easy_hass/room_visibility/set", commands)
+        self.assertIn("easy_hass/settings/subscribe", commands)
 
         self.assertTrue(await async_unload_entry(self.hass, self.entry))
         self.assertFalse(frontend.async_panel_exists(self.hass, PANEL_PATH))
         self.assertTrue(await async_setup_entry(self.hass, self.entry))
         self.assertEqual(tuple(self.hass.http.app.router.routes()), routes)
+        self.assertEqual(self.hass.data["websocket_api"], commands)
 
     async def test_changed_build_reload_updates_graph_url_without_duplicate_route(self):
         await async_setup_entry(self.hass, self.entry)

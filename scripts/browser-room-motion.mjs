@@ -24,7 +24,7 @@ try {
     assert.ok(entity, `Missing isolated fixture ${suffix}`);
     return { ...entity, room: entity.area_id || devices.find(device => device.id === entity.device_id)?.area_id };
   };
-  fixtures = { light: fixture('living_light'), binary: fixture('living_onoff'), cover: fixture('living_cover') };
+  fixtures = { light: fixture('living_light'), binary: fixture('living_onoff'), cover: fixture('living_cover'), vacuum: fixture('hall_vacuum') };
   await ha.call('subscribe_events', { event_type: 'call_service' }, event => serviceEvents.push(event.data));
   ({ browser, context, page } = await localBrowser({ hasTouch: true, reducedMotion: 'no-preference' }));
   cdp = await context.newCDPSession(page);
@@ -33,7 +33,7 @@ try {
   const stage = page.locator('.room-stage'), current = page.locator('.room-detail[data-current-room]');
   const card = id => page.locator(`[data-room-card="${id}"]`);
   const source = id => card(id).locator('[data-open-room]');
-  const entityControl = id => current.locator(`[data-control][data-entity="${id}"]`);
+  const entityControl = id => current.locator(`[data-inline-range="${id}"]`);
   const selected = () => current.getAttribute('data-room-detail');
   const state = async id => (await ha.call('get_states')).find(entity => entity.entity_id === id);
   const service = (domain, name, id, data = {}) => ha.call('call_service', { domain, service: name, target: { entity_id: id }, service_data: data });
@@ -211,18 +211,29 @@ try {
     }
   });
 
-  await check('Swiping across a device-info row changes room without opening its native HA dialog', async () => {
+  await check('Swiping across a non-sensor device row changes room without opening its native HA dialog', async () => {
     await dot(fixtures.light.room);
-    await panel.evaluate(el => { window.__roomMoreInfo = []; el.addEventListener('hass-more-info', event => window.__roomMoreInfo.push(event.detail.entityId)); });
-    const rowInfo = current.locator(`[data-more-info="${fixtures.light.entity_id}"]`);
-    await rowInfo.scrollIntoViewIfNeeded();
-    const rect = await rowInfo.boundingBox();
-    const index = roomIds.indexOf(fixtures.light.room), direction = index < roomIds.length - 1 ? -1 : 1;
-    const origin = { x: direction < 0 ? rect.x + rect.width - 10 : rect.x + 10, y: rect.y + rect.height / 2 };
-    await swipe(direction * 165, 0, origin);
-    await expect(current).toHaveAttribute('data-room-detail', roomIds[index - direction]);
-    assert.deepEqual(await page.evaluate(() => window.__roomMoreInfo), []);
-    await expect(page.locator('ha-more-info-dialog').getByRole('dialog')).not.toBeVisible();
+    // Use a real local vacuum through a browser-only area assignment, never a HA registry write.
+    await panel.evaluate((el, { id, roomId }) => {
+      window.__roomDeviceRegistries = el._registries;
+      el._registries = { ...el._registries, entities: el._registries.entities.map(entity => entity.entity_id === id ? { ...entity, area_id: roomId } : entity) };
+      window.__roomMoreInfo = [];
+      el.addEventListener('hass-more-info', event => window.__roomMoreInfo.push(event.detail.entityId));
+      el._lastRoomMarkup = null; el._update();
+    }, { id: fixtures.vacuum.entity_id, roomId: fixtures.light.room });
+    try {
+      const rowInfo = current.locator(`[data-more-info="${fixtures.vacuum.entity_id}"]`);
+      await rowInfo.scrollIntoViewIfNeeded();
+      const rect = await rowInfo.boundingBox();
+      const index = roomIds.indexOf(fixtures.light.room), direction = index < roomIds.length - 1 ? -1 : 1;
+      const origin = { x: direction < 0 ? rect.x + rect.width - 10 : rect.x + 10, y: rect.y + rect.height / 2 };
+      await swipe(direction * 165, 0, origin);
+      await expect(current).toHaveAttribute('data-room-detail', roomIds[index - direction]);
+      assert.deepEqual(await page.evaluate(() => window.__roomMoreInfo), []);
+      await expect(page.locator('ha-more-info-dialog').getByRole('dialog')).not.toBeVisible();
+    } finally {
+      await panel.evaluate(el => { el._registries = window.__roomDeviceRegistries; delete window.__roomDeviceRegistries; el._lastRoomMarkup = null; el._update(); });
+    }
   });
 
   await check('Closing a deeply scrolled room keeps the cropped hero inside the shrinking card', async () => {
@@ -249,7 +260,7 @@ try {
     await open(first);
   });
 
-  await check('Touch light and cover hold-drag gestures stay in the room and commit only their own HA entity', async () => {
+  await check('Touch permanent light and cover ranges stay in the room and commit only their own HA entity', async () => {
     await dot(fixtures.light.room); await current.evaluate(el => { el.scrollTop = 0; });
     fixturesChanged = true;
     for (const [kind, fixture] of [['light', fixtures.light], ['cover', fixtures.cover]]) {
@@ -261,9 +272,14 @@ try {
       const rect = await entityControl(fixture.entity_id).boundingBox(), point = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
       serviceEvents.length = 0;
       await touch('touchStart', point.x, point.y);
-      await expect(page.locator('.adjust-bar')).toBeVisible({ timeout: 1500 });
+      const inline = current.locator(`[data-inline-control="${fixture.entity_id}"]`);
+      if (kind === 'light') await expect(inline).not.toHaveClass(/is-adjusting/);
+      else await expect(inline).toHaveClass(/is-adjusting/);
       await touch('touchMove', point.x - 60, point.y);
-      const expected = Number((await page.locator('#adjust-value').textContent()).replace(/\D/g, ''));
+      await expect(inline).toHaveClass(/is-adjusting/);
+      const expected = Number(await entityControl(fixture.entity_id).inputValue());
+      await expect(page.locator('.adjust-bar')).toHaveCount(0);
+      assert.equal(serviceEvents.length, 0);
       assert.ok(expected > 0 && expected < 70);
       await touch('touchEnd'); await expect(page.locator('.adjust-bar')).toHaveCount(0);
       await expect(current).toHaveAttribute('data-room-detail', fixtures.light.room);
@@ -274,11 +290,11 @@ try {
       assert.equal(await panel.locator('#app-content').evaluate(el => el.inert), true);
     }
     serviceEvents.length = 0;
-    await entityControl(fixtures.light.entity_id).focus(); await page.keyboard.press('ArrowRight');
-    await expect(page.locator('#adjust-range')).toBeFocused();
-    assert.equal(await current.evaluate(el => !!el.closest('[inert]')), true, 'The room behind a keyboard adjustment stays inert');
+    await entityControl(fixtures.light.entity_id).focus(); await page.keyboard.down('ArrowRight');
+    await expect(entityControl(fixtures.light.entity_id)).toBeFocused();
+    assert.equal(await current.evaluate(el => !!el.closest('[inert]')), false, 'Inline adjustment keeps the current room accessible');
     assert.equal(await panel.locator('#app-content').evaluate(el => el.inert), true);
-    await page.keyboard.press('Escape'); await expect(page.locator('.adjust-bar')).toHaveCount(0);
+    await page.keyboard.press('Escape'); await page.keyboard.up('ArrowRight'); await expect(page.locator('.adjust-bar')).toHaveCount(0);
     await expect(current).toHaveAttribute('data-room-detail', fixtures.light.room);
     await expect(entityControl(fixtures.light.entity_id)).toBeFocused();
     assert.equal(await current.evaluate(el => !!el.closest('[inert]')), false);

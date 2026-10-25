@@ -5,9 +5,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { localBrowser } from './browser-login.mjs';
 import { LocalHA } from './ha-client.mjs';
 
-const report = { at: new Date().toISOString(), results: [], errors: [], geometry: [] };
+const report = { at: new Date().toISOString(), results: [], errors: [], geometry: [], directDrags: [] };
 await mkdir(new URL('../test-results/', import.meta.url), { recursive: true });
-let ha, browser, context, page, initial, fixtures, appearance, failure;
+let ha, browser, context, page, initial, fixtures, appearance, failure, cdp, activeTouch = false;
 const serviceEvents = [];
 const check = async (name, fn) => {
   try { await fn(); report.results.push({ name, pass: true }); console.log(`PASS ${name}`); }
@@ -27,8 +27,10 @@ try {
   fixtures = { living: fixture('living_light'), binary: fixture('living_onoff'), kitchen: fixture('kitchen_light'), cover: fixture('living_cover') };
   await ha.call('subscribe_events', { event_type: 'call_service' }, event => serviceEvents.push(event.data));
   ({ browser, context, page } = await localBrowser({ hasTouch: true, reducedMotion: 'no-preference' }));
+  cdp = await context.newCDPSession(page);
   page.on('pageerror', error => report.errors.push(error.message));
   const panel = page.locator('easy-hass-panel');
+  report.revision = await panel.evaluate(el => el.shadowRoot.querySelector('link[rel="stylesheet"]').href.match(/builds\/([^/]+)\//)?.[1]);
   const control = (kind = 'light', room = fixtures.living.room) => page.locator(`[data-room-card="${room}"] [data-control="${kind}"]`);
   const state = async id => (await ha.call('get_states')).find(item => item.entity_id === id);
   const service = (domain, name, ids, data = {}) => ha.call('call_service', { domain, service: name, target: { entity_id: ids }, service_data: data });
@@ -45,10 +47,12 @@ try {
   const cleaned = async () => {
     await expect(page.locator('.adjust-bar')).toHaveCount(0);
     await expect(page.locator('[data-morph-source]')).toHaveCount(0);
-    assert.equal(await panel.evaluate(el => !el._gesture && !el._adjustment && !el._closingAdjustment
-      && !el.shadowRoot.getElementById('app-content').inert
-      && !el.shadowRoot.getElementById('overlay-root').inert
-      && !el.shadowRoot.getElementById('overlay-root').hasAttribute('aria-hidden')), true);
+    assert.deepEqual(await panel.evaluate(el => ({ gesture: !!el._gesture, adjustment: !!el._adjustment,
+      closing: !!el._closingAdjustment, room: el._presentedRoomId || null,
+      appInert: el.shadowRoot.getElementById('app-content').inert,
+      overlayInert: el.shadowRoot.getElementById('overlay-root').inert,
+      overlayHidden: el.shadowRoot.getElementById('overlay-root').hasAttribute('aria-hidden') })),
+    { gesture: false, adjustment: false, closing: false, room: null, appInert: false, overlayInert: false, overlayHidden: false });
   };
   const prepare = async (value = 70) => {
     await service('light', 'turn_off', fixtures.binary.entity_id);
@@ -60,7 +64,7 @@ try {
   const prepareCover = async (value = 70) => {
     await service('cover', 'set_cover_position', fixtures.cover.entity_id, { position: value });
     await expect.poll(() => panel.evaluate((el, id) => el.hass.states[id].attributes.current_position, fixtures.cover.entity_id)).toBe(value);
-    await expect(control('cover', fixtures.cover.room)).toHaveAttribute('aria-label', new RegExp(`, ${value} Prozent`));
+    await expect(control('cover', fixtures.cover.room)).toHaveAttribute('aria-label', new RegExp(`, ${value} %`));
     serviceEvents.length = 0;
   };
   const point = async locator => {
@@ -90,6 +94,45 @@ try {
     await expect(page.locator('.adjust-bar')).toBeVisible({ timeout: 1500 });
     return p;
   };
+  const touch = async (type, p) => {
+    await cdp.send('Input.dispatchTouchEvent', { type, touchPoints: ['touchEnd', 'touchCancel'].includes(type) ? [] : [p] });
+    activeTouch = !['touchEnd', 'touchCancel'].includes(type);
+  };
+  const startDirect = async (mode, locator) => {
+    const p = await point(locator);
+    await page.evaluate(() => { window.__morphDirectProbe = {}; });
+    if (mode === 'mouse') { await page.mouse.move(p.x, p.y); await page.mouse.down(); }
+    else await touch('touchStart', p);
+    return p;
+  };
+  const moveDirect = (mode, p) => mode === 'mouse' ? page.mouse.move(p.x, p.y) : touch('touchMove', p);
+  const endDirect = async mode => {
+    if (mode === 'mouse') await page.mouse.up(); else await touch('touchEnd');
+    await page.evaluate(() => { window.__morphDirectProbe = null; });
+  };
+  const directValue = async (kind, mode, scope = 'home', direction = -1) => {
+    await expect(page.locator('.adjust-bar')).toBeVisible();
+    const evidence = await page.evaluate(() => window.__morphDirectProbe);
+    assert.ok(evidence.timerSuppressed, 'The 400 ms hold timer is disabled for this check');
+    assert.ok(evidence.elapsed >= 0 && evidence.elapsed < 400, 'Horizontal motion opens the overlay before the hold threshold');
+    assert.equal(evidence.anchorX, evidence.downX, 'The first movement uses the original pointer-down position');
+    assert.equal(evidence.dirty, true, 'The same movement already changes the displayed value');
+    assert.equal(evidence.captured, true);
+    const value = Number((await page.locator('#adjust-value').textContent()).replace(/\D/g, ''));
+    assert.ok(direction < 0 ? value > 0 && value < 70 : value > 70 && value < 100);
+    assert.equal(serviceEvents.length, 0, 'Dragging only previews until release');
+    report.directDrags.push({ kind, mode, scope, direction: direction < 0 ? 'left' : 'right', elapsed: evidence.elapsed, value });
+    return value;
+  };
+  const expectSingleAdjustment = async (kind, value) => {
+    const fixture = kind === 'cover' ? fixtures.cover : fixtures.living;
+    await expect.poll(async () => kind === 'cover' ? (await state(fixture.entity_id)).attributes.current_position
+      : Math.round((await state(fixture.entity_id)).attributes.brightness / 255 * 100)).toBe(value);
+    await quietCalls(1, kind); assert.equal(serviceEvents.length, 1);
+    const call = calls(kind)[0], targets = call.service_data?.entity_id ?? call.target?.entity_id;
+    assert.deepEqual(Array.isArray(targets) ? targets : [targets], [fixture.entity_id], 'Only the capable fixture is targeted');
+    assert.equal(call.service, kind === 'cover' ? 'set_cover_position' : 'turn_on');
+  };
   // Pause only this panel's real WAAPI effects at creation, without changing durations/keyframes.
   // This makes exact timeline screenshots deterministic even on a busy host.
   appearance = await panel.evaluate(el => ({ key: el._themeKey(), value: localStorage.getItem(el._themeKey()) }));
@@ -105,6 +148,22 @@ try {
       return animation;
     };
   });
+  await panel.evaluate(el => {
+    // Disable only the native hold timer for the focused direct-drag checks.
+    // Real mouse/touch events must open and update the overlay themselves.
+    el.shadowRoot.addEventListener('pointerdown', () => {
+      const probe = window.__morphDirectProbe, gesture = el._gesture;
+      if (!probe || !gesture) return;
+      probe.started = performance.now(); probe.downX = gesture.x;
+      probe.timerSuppressed = !!gesture.timer; clearTimeout(gesture.timer);
+    });
+    el.shadowRoot.addEventListener('pointermove', () => {
+      const probe = window.__morphDirectProbe, adjustment = el._adjustment, gesture = el._gesture;
+      if (!probe || probe.elapsed !== undefined || !adjustment || !gesture) return;
+      Object.assign(probe, { elapsed: performance.now() - probe.started, anchorX: adjustment.anchorX,
+        dirty: adjustment.dirty, captured: gesture.button.hasPointerCapture(gesture.pointerId) });
+    });
+  });
 
   await check('Short tap still sends one real HA toggle and never morphs', async () => {
     await service('light', 'turn_off', [fixtures.living.entity_id, fixtures.binary.entity_id]);
@@ -114,6 +173,59 @@ try {
     await expect.poll(async () => (await state(fixtures.living.entity_id)).state).toBe('on');
     await quietCalls(1);
     await cleaned();
+  });
+
+  await check('Mouse and real touch directly adjust light and cover before 400 ms, then commit only the displayed value once', async () => {
+    for (const kind of ['light', 'cover']) for (const mode of ['mouse', 'touch']) {
+      if (kind === 'light') await prepare(); else await prepareCover();
+      const p = await startDirect(mode, control(kind, kind === 'cover' ? fixtures.cover.room : fixtures.living.room));
+      const direction = mode === 'touch' ? 1 : -1;
+      await moveDirect(mode, { x: p.x + direction * 60, y: p.y });
+      const value = await directValue(kind, mode, 'home', direction);
+      await endDirect(mode); await expectSingleAdjustment(kind, value); await cleaned();
+      if (kind === 'light') assert.equal((await state(fixtures.binary.entity_id)).state, 'off');
+    }
+  });
+
+  await check('Vertical or diagonal movement cancels light and cover gestures even if horizontal movement follows', async () => {
+    for (const kind of ['light', 'cover']) for (const mode of ['mouse', 'touch']) {
+      if (kind === 'light') await prepare(); else await prepareCover();
+      const fixture = kind === 'cover' ? fixtures.cover : fixtures.living, before = await state(fixture.entity_id);
+      const p = await startDirect(mode, control(kind, fixture.room));
+      await moveDirect(mode, { x: p.x + (mode === 'touch' ? 20 : 0), y: p.y + 28 });
+      await moveDirect(mode, { x: p.x - 70, y: p.y + 28 });
+      await expect(page.locator('.adjust-bar')).toHaveCount(0);
+      await endDirect(mode); await cleaned(); await quietCalls(0, kind); assert.equal(serviceEvents.length, 0);
+      assert.equal((await state(fixture.entity_id)).last_updated, before.last_updated);
+    }
+  });
+
+  await check('Room-detail permanent ranges adjust only their entity while binary lights expose only a toggle', async () => {
+    await prepare();
+    await page.locator(`[data-open-room="${fixtures.living.room}"]`).click();
+    const detail = panel.locator('.room-detail[data-current-room]');
+    await expect(detail).toHaveAttribute('data-room-detail', fixtures.living.room);
+    await expect(panel.locator('.room-transition-ghost')).toHaveCount(0);
+    const binary = detail.locator(`[data-inline-control="${fixtures.binary.entity_id}"]`);
+    await expect(binary).toBeVisible();
+    await expect(binary.locator('[data-inline-toggle]')).toBeEnabled();
+    await expect(binary.locator('[data-inline-range]')).toHaveCount(0);
+    const before = await state(fixtures.binary.entity_id);
+    const dimmer = detail.locator(`[data-inline-range="${fixtures.living.entity_id}"]`);
+    await dimmer.scrollIntoViewIfNeeded();
+    const box = await dimmer.boundingBox();
+    const p = await startDirect('mouse', dimmer);
+    await moveDirect('mouse', { x: box.x + box.width * .35, y: p.y });
+    const value = Number(await dimmer.inputValue());
+    assert.ok(Math.abs(value - 35) <= 1);
+    await expect(detail.locator(`[data-inline-control="${fixtures.living.entity_id}"] .inline-value`)).toHaveText(`${value} %`);
+    assert.equal(serviceEvents.length, 0);
+    await expect(page.locator('.adjust-bar')).toHaveCount(0);
+    await endDirect('mouse'); await expectSingleAdjustment('light', value);
+    assert.equal((await state(fixtures.binary.entity_id)).last_updated, before.last_updated);
+    await expect(page.locator('.adjust-bar')).toHaveCount(0); await expect(page.locator('[data-morph-source]')).toHaveCount(0);
+    await detail.locator('[data-room-back]').click(); await expect(panel.locator('.room-stage')).toHaveCount(0);
+    await expect(panel.locator('.room-transition-ghost')).toHaveCount(0); await cleaned();
   });
 
   await check('Exact 0/160/320ms geometry morphs circle to full bar without squashing SVG or losing capture', async () => {
@@ -318,8 +430,9 @@ try {
   if (page) {
     await cleanup(() => page.evaluate(() => window.__morphServiceRestore?.()));
     await cleanup(() => page.evaluate(() => { window.__morphFreeze = false; if (window.__morphNativeAnimate) Element.prototype.animate = window.__morphNativeAnimate; }));
-    await cleanup(() => page.mouse.up());
     await cleanup(() => page.keyboard.press('Escape'));
+    if (activeTouch) await cleanup(() => cdp?.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] }));
+    await cleanup(() => page.mouse.up());
     await cleanup(() => page.emulateMedia({ reducedMotion: 'no-preference' }));
     if (appearance) await cleanup(() => page.locator('easy-hass-panel').evaluate((el, saved) => {
       if (saved.value === null) localStorage.removeItem(saved.key); else localStorage.setItem(saved.key, saved.value);

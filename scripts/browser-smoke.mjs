@@ -86,10 +86,10 @@ try {
     assert.equal((await getState(onoff.entity_id)).state, 'off');
   });
   await check('Dragging to both boundaries reaches actual HA 0 and 100 percent', async () => {
-    for (const [x, value] of [[16, 0], [374, 100]]) {
+    for (const [x, value, label] of [[16, 0, 'Aus'], [374, 100, 'An']]) {
       const p = await hold('light');
       await page.mouse.move(x, p.y, { steps: 8 });
-      await expect(page.locator('#adjust-value')).toHaveText(`${value} %`);
+      await expect(page.locator('#adjust-value')).toHaveText(label);
       await page.mouse.up();
       await expect.poll(async () => { const state = await getState(living.entity_id); return state.state === 'off' ? 0 : Math.round(state.attributes.brightness / 255 * 100); }).toBe(value);
     }
@@ -103,11 +103,11 @@ try {
   });
   await check('Cover tap really closes and reopens; its icon changes with position', async () => {
     await service('cover', 'set_cover_position', cover.entity_id, { position: 100 });
-    await expect(control('cover')).toHaveAttribute('aria-label', /, 100 Prozent/);
+    await expect(control('cover')).toHaveAttribute('aria-label', /, Auf/);
     const openIcon = await control('cover').innerHTML();
     await control('cover').click();
     await expect.poll(async () => (await getState(cover.entity_id)).attributes.current_position).toBe(0);
-    await expect(control('cover')).toHaveAttribute('aria-label', /, 0 Prozent/);
+    await expect(control('cover')).toHaveAttribute('aria-label', /, Zu/);
     assert.notEqual(await control('cover').innerHTML(), openIcon);
     await control('cover').click();
     await expect.poll(async () => (await getState(cover.entity_id)).attributes.current_position).toBe(100);

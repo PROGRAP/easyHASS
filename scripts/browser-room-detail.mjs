@@ -9,7 +9,7 @@ const cardHitsOnly = process.argv.includes('--card-hits');
 const reportPath = cardHitsOnly ? 'test-results/browser-room-card-hits.json' : 'test-results/browser-room-detail.json';
 const report = { at: new Date().toISOString(), results: [], errors: [] };
 await mkdir(new URL('../test-results/', import.meta.url), { recursive: true });
-let ha, browser, page, initial, fixtures, appearance, groupEntry, groupFlow, groupEntity, tempArea, failure;
+let ha, browser, context, page, cdp, activeTouch = false, initial, fixtures, appearance, groupEntry, groupFlow, groupEntity, tempArea, failure;
 const groupName = `Easy-Hass Testgruppe ${Date.now()}`;
 const serviceEvents = [];
 const check = async (name, fn, cardHitCheck = false) => {
@@ -30,16 +30,19 @@ try {
     return { ...entity, room: entity.area_id || devices.find(device => device.id === entity.device_id)?.area_id };
   };
   fixtures = { light: fixture('living_light'), binary: fixture('living_onoff'), cover: fixture('living_cover'),
-    temperature: fixture('living_temperature'), humidity: fixture('living_humidity'), kitchen: fixture('kitchen_light') };
+    temperature: fixture('living_temperature'), humidity: fixture('living_humidity'), kitchen: fixture('kitchen_light'), vacuum: fixture('hall_vacuum') };
   const room = areas.find(area => area.area_id === fixtures.light.room);
   assert.ok(room);
   await ha.call('subscribe_events', { event_type: 'call_service' }, event => serviceEvents.push(event.data));
-  ({ browser, page } = await localBrowser({ hasTouch: true, reducedMotion: 'no-preference' }));
+  ({ browser, context, page } = await localBrowser({ hasTouch: true, reducedMotion: 'no-preference' }));
+  cdp = await context.newCDPSession(page);
   page.on('pageerror', error => report.errors.push(error.message));
   const panel = page.locator('easy-hass-panel');
   const currentRoom = panel.locator('.room-detail[data-current-room]');
   const row = id => currentRoom.locator(`[data-entity-row="${id}"]`);
-  const action = id => row(id).locator('[data-control]');
+  const action = id => row(id).locator(`[data-inline-toggle="${id}"]`);
+  const range = id => row(id).locator(`[data-inline-range="${id}"]`);
+  report.revision = await panel.evaluate(el => el.shadowRoot.querySelector('link[rel=stylesheet]')?.href.match(/builds\/([^/]+)/)?.[1]);
   const roomLink = id => page.locator(`.room-open[data-open-room="${id}"]`);
   const state = async id => (await ha.call('get_states')).find(item => item.entity_id === id);
   const service = (domain, name, ids, data = {}) => ha.call('call_service', { domain, service: name, target: { entity_id: ids }, service_data: data });
@@ -61,16 +64,37 @@ try {
       return current?.state === (on ? 'on' : 'off') && (!on || brightness == null || Math.round(current.attributes.brightness / 255 * 100) === brightness);
     }, [id, on, brightness])).toBe(true);
   };
-  const hold = async id => {
-    await action(id).scrollIntoViewIfNeeded();
-    const rect = await action(id).boundingBox();
-    const point = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-    await page.mouse.move(point.x, point.y); await page.mouse.down();
-    await expect(page.locator('.adjust-bar')).toBeVisible({ timeout: 1500 });
-    assert.equal(await panel.evaluate((el, id) => el._gesture?.room.id === `entity:${id}`
-      && el._gesture.button.hasPointerCapture(el._gesture.pointerId), id), true);
-    await expect(page.locator(`[data-morph-source][data-entity="${id}"]`)).toHaveCount(1);
-    return point;
+  const touch = async (type, x, y) => {
+    await cdp.send('Input.dispatchTouchEvent', { type, touchPoints: ['touchEnd', 'touchCancel'].includes(type) ? [] : [{ x, y }] });
+    activeTouch = !['touchEnd', 'touchCancel'].includes(type);
+  };
+  const beginRange = async (id, mode = 'mouse') => {
+    await range(id).scrollIntoViewIfNeeded();
+    const box = await range(id).boundingBox(), point = { x: box.x + box.width * .65, y: box.y + box.height / 2 };
+    if (mode === 'touch') await touch('touchStart', point.x, point.y);
+    else { await page.mouse.move(point.x, point.y); await page.mouse.down(); }
+    if (id.startsWith('light.')) await expect(row(id)).not.toHaveClass(/is-adjusting/);
+    else await expect(row(id)).toHaveClass(/is-adjusting/);
+    return { box, point };
+  };
+  const moveRange = async (id, mode, box, fraction) => {
+    const x = box.x + box.width * fraction, y = box.y + box.height / 2;
+    if (mode === 'touch') await touch('touchMove', x, y); else await page.mouse.move(x, y, { steps: 4 });
+    await expect(row(id)).toHaveClass(/is-adjusting/);
+    const value = Number(await range(id).inputValue());
+    assert.ok(Math.abs(value - fraction * 100) <= 1, 'The permanent range uses its full width as absolute 0–100%');
+    await expect(row(id).locator('.inline-value')).toHaveText(`${value} %`);
+    await expect(page.locator('.adjust-bar')).toHaveCount(0);
+    assert.equal(serviceEvents.length, 0, 'No HA write before release');
+    return value;
+  };
+  const endRange = async mode => mode === 'touch' ? touch('touchEnd') : page.mouse.up();
+  const dragRange = async (id, mode, fraction) => {
+    serviceEvents.length = 0;
+    const { box } = await beginRange(id, mode), value = await moveRange(id, mode, box, fraction);
+    await endRange(mode); await assertOneTarget(id);
+    await expect(row(id)).not.toHaveClass(/is-adjusting|is-pending/);
+    return value;
   };
   const waitRoomOpen = async (id, options = {}) => {
     await expect(currentRoom).toHaveAttribute('data-room-detail', id, options);
@@ -205,9 +229,9 @@ try {
     await page.goForward(); await waitRoomOpen(room.area_id);
   });
 
-  await check('Only populated device sections appear, and names and sensor values come from HA', async () => {
-    assert.deepEqual(await currentRoom.locator('.device-section h2').allTextContents(), ['Licht', 'Beschattung', 'Sensoren']);
-    for (const fixture of [fixtures.light, fixtures.binary, fixtures.cover, fixtures.temperature, fixtures.humidity]) {
+  await check('Only devices appear as rows while HA temperature and humidity remain in the room header', async () => {
+    assert.deepEqual(await currentRoom.locator('.device-section h2').allTextContents(), ['Licht', 'Beschattung']);
+    for (const fixture of [fixtures.light, fixtures.binary, fixtures.cover]) {
       await expect(row(fixture.entity_id)).toHaveCount(1);
       const expectedName = fixture.name || initial.get(fixture.entity_id).attributes.friendly_name || fixture.original_name || fixture.entity_id;
       await expect(row(fixture.entity_id).locator('.device-name')).toHaveAttribute('title', expectedName);
@@ -215,48 +239,149 @@ try {
       assert.ok(compactName && expectedName.endsWith(compactName), 'Compact labels retain the actual HA name without its repeated room prefix');
     }
     for (const sensor of [fixtures.temperature, fixtures.humidity]) {
-      await expect(row(sensor.entity_id).locator('.device-reading')).toHaveText(`${format(initial.get(sensor.entity_id).state)} ${initial.get(sensor.entity_id).attributes.unit_of_measurement}`);
-      await expect(row(sensor.entity_id).locator('[data-control], [data-toggle-entity]')).toHaveCount(0);
+      await expect(row(sensor.entity_id)).toHaveCount(0);
+      await expect(currentRoom.locator('.detail-climate')).toContainText(format(initial.get(sensor.entity_id).state));
+    }
+    // Browser-only candidate proves binary_sensor is excluded too; no HA registry or state write.
+    const binarySensorId = 'binary_sensor.easy_hass_browser_room_sensor';
+    await panel.evaluate((el, { id, roomId }) => {
+      window.__roomSensorProbe = { registries: el._registries, hass: el.hass };
+      el._registries = { ...el._registries, entities: [...el._registries.entities,
+        { entity_id: id, unique_id: id, name: 'Test-Bewegung', area_id: roomId, device_id: null, hidden_by: null, disabled_by: null }] };
+      el.hass = { ...el.hass, states: { ...el.hass.states, [id]: { entity_id: id, state: 'on', attributes: { friendly_name: 'Test-Bewegung', device_class: 'motion' } } } };
+    }, { id: binarySensorId, roomId: room.area_id });
+    try {
+      assert.equal(await panel.evaluate((el, id) => el._home.entities.some(entity => entity.id === id), binarySensorId), true);
+      await expect(row(binarySensorId)).toHaveCount(0);
+      await expect(currentRoom.locator('[data-entity-row^="sensor."], [data-entity-row^="binary_sensor."]')).toHaveCount(0);
+      assert.deepEqual(await currentRoom.locator('.device-section h2').allTextContents(), ['Licht', 'Beschattung']);
+    } finally {
+      await panel.evaluate(el => { el._registries = window.__roomSensorProbe.registries; el.hass = window.__roomSensorProbe.hass; delete window.__roomSensorProbe; });
     }
   });
 
-  await check('An individual light tap and morph dim only that entity, not the other room light', async () => {
+  await check('Permanent light bars toggle one entity and mouse/touch adjust it directly without an overlay', async () => {
     await setLight(fixtures.light.entity_id, false); await setLight(fixtures.binary.entity_id, false); serviceEvents.length = 0;
+    for (const fixture of [fixtures.light, fixtures.binary, fixtures.cover]) {
+      await expect(row(fixture.entity_id)).toHaveAttribute('data-inline-control', fixture.entity_id);
+      await expect(row(fixture.entity_id).locator('.inline-fill')).toHaveCount(1);
+      await expect(row(fixture.entity_id).locator('.inline-value')).toBeVisible();
+    }
+    await expect(range(fixtures.binary.entity_id)).toHaveCount(0);
+    await action(fixtures.binary.entity_id).click();
+    await expect.poll(async () => (await state(fixtures.binary.entity_id)).state).toBe('on');
+    await assertOneTarget(fixtures.binary.entity_id);
+    assert.equal((await state(fixtures.light.entity_id)).state, 'off');
+    await setLight(fixtures.binary.entity_id, false); serviceEvents.length = 0;
     await action(fixtures.light.entity_id).click();
     await expect.poll(async () => (await state(fixtures.light.entity_id)).state).toBe('on');
-    assert.equal((await state(fixtures.binary.entity_id)).state, 'off');
     await assertOneTarget(fixtures.light.entity_id);
-    await setLight(fixtures.light.entity_id, true, 70); serviceEvents.length = 0;
-    const point = await hold(fixtures.light.entity_id); await page.mouse.move(point.x - 65, point.y, { steps: 4 });
-    const expected = Number((await page.locator('#adjust-value').textContent()).replace(/\D/g, ''));
-    assert.ok(expected > 0 && expected < 70);
-    await page.mouse.up(); await closeAdjust();
-    await expect.poll(async () => Math.round((await state(fixtures.light.entity_id)).attributes.brightness / 255 * 100)).toBe(expected);
-    await assertOneTarget(fixtures.light.entity_id);
-    assert.equal((await state(fixtures.binary.entity_id)).state, 'off');
-    assert.equal(new URL(page.url()).hash, `#room=${encodeURIComponent(room.area_id)}`);
+    for (const [mode, fraction] of [['mouse', .32], ['touch', .82]]) {
+      await setLight(fixtures.light.entity_id, true, 70);
+      const expected = await dragRange(fixtures.light.entity_id, mode, fraction);
+      await expect.poll(async () => Math.round((await state(fixtures.light.entity_id)).attributes.brightness / 255 * 100)).toBe(expected);
+      assert.equal((await state(fixtures.binary.entity_id)).state, 'off');
+      assert.equal(new URL(page.url()).hash, `#room=${encodeURIComponent(room.area_id)}`);
+    }
   });
 
-  await check('The individual cover retains its lilac morph and writes only its actual HA position', async () => {
-    await service('cover', 'set_cover_position', fixtures.cover.entity_id, { position: 70 });
-    await expect(action(fixtures.cover.entity_id)).toHaveAttribute('aria-label', /, 70 Prozent/); serviceEvents.length = 0;
-    const point = await hold(fixtures.cover.entity_id); await page.mouse.move(point.x - 60, point.y, { steps: 4 });
-    const expected = Number((await page.locator('#adjust-value').textContent()).replace(/\D/g, ''));
-    assert.ok(expected > 0 && expected < 70);
-    assert.equal(await page.locator('.adjust-fill').evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(216, 199, 235)');
-    await page.mouse.up(); await closeAdjust();
-    await expect.poll(async () => (await state(fixtures.cover.entity_id)).attributes.current_position).toBe(expected);
-    await assertOneTarget(fixtures.cover.entity_id);
+  await check('The permanent lilac cover range accepts mouse/touch and targets only its actual HA position', async () => {
+    for (const [mode, fraction] of [['mouse', .38], ['touch', .86]]) {
+      await service('cover', 'set_cover_position', fixtures.cover.entity_id, { position: 70 });
+      await expect(range(fixtures.cover.entity_id)).toHaveValue('70');
+      const expected = await dragRange(fixtures.cover.entity_id, mode, fraction);
+      await expect.poll(async () => (await state(fixtures.cover.entity_id)).attributes.current_position).toBe(expected);
+      assert.equal(await row(fixtures.cover.entity_id).locator('.inline-fill').evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(216, 199, 235)');
+      assert.equal(new URL(page.url()).hash, `#room=${encodeURIComponent(room.area_id)}`);
+    }
   });
 
-  await check('A sensor row opens Home Assistant’s native more-info dialog for that entity', async () => {
-    await panel.evaluate(el => { window.__roomInfoEvents = []; el.addEventListener('hass-more-info', event => window.__roomInfoEvents.push(event.detail.entityId)); });
-    await row(fixtures.temperature.entity_id).locator('.device-info').click();
-    const dialog = page.locator('ha-more-info-dialog').getByRole('dialog');
-    await expect(dialog).toBeVisible({ timeout: 10000 });
-    assert.deepEqual(await page.evaluate(() => window.__roomInfoEvents), [fixtures.temperature.entity_id]);
-    await page.keyboard.press('Escape'); await expect(dialog).not.toBeVisible();
-    await waitRoomOpen(room.area_id);
+  await check('Native range keys preview without writing and commit exactly once on keyup, including 0 and 100', async () => {
+    for (const [kind, fixture] of [['light', fixtures.light], ['cover', fixtures.cover]]) {
+      const endpoints = kind === 'light' ? [['Home', 0, 'Aus'], ['End', 100, 'An']] : [['Home', 0, 'Zu'], ['End', 100, 'Auf']];
+      for (const [key, value, label] of endpoints) {
+        await range(fixture.entity_id).focus(); serviceEvents.length = 0;
+        await page.keyboard.down(key);
+        await expect(range(fixture.entity_id)).toHaveValue(String(value));
+        await expect(row(fixture.entity_id).locator('.inline-value')).toHaveText(label);
+        await expect(range(fixture.entity_id)).toHaveAttribute('aria-valuetext', label);
+        assert.equal(serviceEvents.length, 0);
+        await page.keyboard.up(key); await assertOneTarget(fixture.entity_id);
+        await expect.poll(async () => {
+          const s = await state(fixture.entity_id);
+          return kind === 'cover' ? s.attributes.current_position : s.state === 'off' ? 0 : Math.round(s.attributes.brightness / 255 * 100);
+        }).toBe(value);
+        await closeAdjust();
+      }
+    }
+    await range(fixtures.light.entity_id).focus(); serviceEvents.length = 0;
+    for (let n = 0; n < 3; n++) await page.keyboard.down('ArrowLeft');
+    await expect(range(fixtures.light.entity_id)).toHaveValue('97');
+    assert.equal(serviceEvents.length, 0);
+    await page.keyboard.up('ArrowLeft'); await assertOneTarget(fixtures.light.entity_id);
+    await expect.poll(async () => Math.round((await state(fixtures.light.entity_id)).attributes.brightness / 255 * 100)).toBe(97);
+  });
+
+  await check('Escape, touch cancellation and vertical scroll discard drafts without changing rooms or devices', async () => {
+    await setLight(fixtures.light.entity_id, true, 70);
+    for (const cancel of ['escape', 'touchCancel', 'vertical']) {
+      serviceEvents.length = 0;
+      const before = await state(fixtures.light.entity_id), mode = cancel === 'escape' ? 'mouse' : 'touch';
+      const { box, point } = await beginRange(fixtures.light.entity_id, mode);
+      if (cancel === 'vertical') {
+        await touch('touchMove', point.x, point.y - 40);
+        await touch('touchMove', point.x - 70, point.y - 40);
+        await touch('touchEnd');
+      } else {
+        await moveRange(fixtures.light.entity_id, mode, box, .34);
+        if (cancel === 'escape') { await page.keyboard.press('Escape'); await page.mouse.up(); }
+        else await touch('touchCancel');
+      }
+      await expect(row(fixtures.light.entity_id)).not.toHaveClass(/is-adjusting|is-pending/);
+      await expect(range(fixtures.light.entity_id)).toHaveValue('70');
+      await page.waitForTimeout(100); assert.equal(serviceEvents.length, 0);
+      assert.equal((await state(fixtures.light.entity_id)).last_updated, before.last_updated);
+      await expect(currentRoom).toHaveAttribute('data-room-detail', room.area_id);
+      await closeAdjust();
+    }
+  });
+
+  await check('Offline controls are disabled and a binary light never exposes an unsupported range', async () => {
+    serviceEvents.length = 0;
+    await panel.evaluate(el => { window.__inlineSavedHass = el.hass; el.hass = { ...el.hass, connected: false }; });
+    try {
+      for (const fixture of [fixtures.light, fixtures.binary, fixtures.cover]) await expect(action(fixture.entity_id)).toBeDisabled();
+      await expect(range(fixtures.light.entity_id)).toBeDisabled();
+      await expect(range(fixtures.cover.entity_id)).toBeDisabled();
+      await expect(range(fixtures.binary.entity_id)).toHaveCount(0);
+      assert.equal(serviceEvents.length, 0);
+    } finally {
+      await panel.evaluate(el => { el.hass = window.__inlineSavedHass; delete window.__inlineSavedHass; });
+    }
+    await expect(action(fixtures.light.entity_id)).toBeEnabled();
+  });
+
+  await check('A non-sensor device still opens Home Assistant’s native more-info dialog', async () => {
+    // Move the existing local vacuum only in this browser's registry copy; HA remains unchanged.
+    await panel.evaluate((el, { id, roomId }) => {
+      window.__roomDeviceRegistries = el._registries;
+      el._registries = { ...el._registries, entities: el._registries.entities.map(entity => entity.entity_id === id ? { ...entity, area_id: roomId } : entity) };
+      window.__roomInfoEvents = [];
+      el.addEventListener('hass-more-info', event => window.__roomInfoEvents.push(event.detail.entityId));
+      el._lastRoomMarkup = null; el._update();
+    }, { id: fixtures.vacuum.entity_id, roomId: room.area_id });
+    try {
+      await expect(row(fixtures.vacuum.entity_id)).toBeVisible();
+      await row(fixtures.vacuum.entity_id).locator('.device-info').click();
+      const dialog = page.locator('ha-more-info-dialog').getByRole('dialog');
+      await expect(dialog).toBeVisible({ timeout: 10000 });
+      assert.deepEqual(await page.evaluate(() => window.__roomInfoEvents), [fixtures.vacuum.entity_id]);
+      await page.keyboard.press('Escape'); await expect(dialog).not.toBeVisible();
+      await waitRoomOpen(room.area_id);
+    } finally {
+      await panel.evaluate(el => { el._registries = window.__roomDeviceRegistries; delete window.__roomDeviceRegistries; el._lastRoomMarkup = null; el._update(); });
+    }
+    await expect(row(fixtures.vacuum.entity_id)).toHaveCount(0);
   });
 
   await check('A real HA light group replaces its two members and controls exactly the group entity', async () => {
@@ -286,6 +411,10 @@ try {
     for (const member of [fixtures.light, fixtures.binary]) await expect.poll(async () => (await state(member.entity_id)).state).toBe('on');
     await assertOneTarget(groupEntity.entity_id);
     assert.equal((await state(fixtures.kitchen.entity_id)).last_updated, kitchenBefore.last_updated);
+    const expected = await dragRange(groupEntity.entity_id, 'mouse', .43);
+    await expect.poll(async () => Math.round((await state(fixtures.light.entity_id)).attributes.brightness / 255 * 100)).toBe(expected);
+    assert.equal((await state(fixtures.kitchen.entity_id)).last_updated, kitchenBefore.last_updated);
+    await expect(row(fixtures.light.entity_id)).toHaveCount(0); await expect(row(fixtures.binary.entity_id)).toHaveCount(0);
   });
 
   await check('Group registry renames and unavailable states update live without duplicating members', async () => {
@@ -294,7 +423,9 @@ try {
     const saved = await state(groupEntity.entity_id);
     await ha.api(`/api/states/${groupEntity.entity_id}`, { state: 'unavailable', attributes: saved.attributes });
     await expect(action(groupEntity.entity_id)).toBeDisabled();
-    await expect(row(groupEntity.entity_id).locator('.device-state')).toContainText('Nicht verfügbar');
+    await expect(range(groupEntity.entity_id)).toBeDisabled();
+    await expect(range(groupEntity.entity_id)).toHaveAttribute('aria-valuetext', 'Nicht verfügbar');
+    await expect(row(groupEntity.entity_id).locator('.inline-value')).toHaveText('—');
     await expect(row(fixtures.light.entity_id)).toHaveCount(0); await expect(row(fixtures.binary.entity_id)).toHaveCount(0);
     await service('light', 'turn_off', groupEntity.entity_id);
     await expect(action(groupEntity.entity_id)).toBeEnabled();
@@ -307,10 +438,14 @@ try {
       await expect(panel).toHaveAttribute('data-theme', theme);
       await currentRoom.evaluate(el => { el.scrollTop = 0; });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-      assert.equal(await row(groupEntity.entity_id).evaluate(el => getComputedStyle(el).borderRadius), '20px');
+      assert.equal(await row(groupEntity.entity_id).evaluate(el => getComputedStyle(el).borderRadius), '28px');
       assert.equal((await action(groupEntity.entity_id).boundingBox()).width, 44);
       await page.screenshot({ path: `test-results/room-detail-${theme}.png`, fullPage: true });
     }
+    await page.setViewportSize({ width: 320, height: 700 });
+    await expect(range(groupEntity.entity_id)).toBeVisible();
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.screenshot({ path: 'test-results/room-detail-narrow.png', fullPage: true });
     await page.setViewportSize({ width: 1280, height: 900 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await expect(row(groupEntity.entity_id)).toBeVisible();
@@ -322,7 +457,7 @@ try {
     await closeRoom();
     tempArea = await ha.call('config/area_registry/create', { name: `Gastzimmer & Büro ${Date.now()}` });
     await expect(roomLink(tempArea.area_id)).toBeVisible(); await openRoom(tempArea.area_id);
-    await expect(currentRoom.locator('.empty-state')).toContainText('noch keine Geräte');
+    await expect(currentRoom.locator('.empty-state')).toContainText('noch keine steuerbaren Geräte');
     await ha.call('config/area_registry/update', { area_id: tempArea.area_id, name: 'Büro <oben> & Gäste' });
     await expect(currentRoom.locator('h1')).toHaveText('Büro <oben> & Gäste');
     await ha.call('config/area_registry/delete', { area_id: tempArea.area_id }); tempArea = null;
@@ -339,7 +474,9 @@ try {
 } finally {
   const cleanup = async fn => { try { await fn(); } catch (error) { report.errors.push(`Cleanup: ${error.message}`); } };
   if (page) {
-    await cleanup(() => page.mouse.up()); await cleanup(() => page.keyboard.press('Escape'));
+    await cleanup(() => page.keyboard.press('Escape'));
+    if (activeTouch && cdp) await cleanup(() => cdp.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] }));
+    await cleanup(() => page.mouse.up());
     if (appearance) await cleanup(() => page.locator('easy-hass-panel').evaluate((el, saved) => {
       if (saved.value === null) localStorage.removeItem(saved.key); else localStorage.setItem(saved.key, saved.value);
       el._applyTheme();
