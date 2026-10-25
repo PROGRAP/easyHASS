@@ -95,10 +95,13 @@ in den Raum. Die globale Zahl eingeschalteter Lampen zählt identische Entities 
 in `entry.options.room_device_order`. Schlüssel sind `device:<id>` bzw.
 `entity:<entity_id>`; eine leere Liste entfernt die individuelle Sortierung.
 Der gemeinsame Einstellungs-Stream verteilt Änderungen an andere Clients.
-Eine individuell sortierte Raumansicht zeigt die steuerbaren Geräte unter
-**Geräte** in genau dieser Reihenfolge, auch über Gerätetypen hinweg. Ohne
-individuelle Sortierung bleiben die bisherigen Abschnitte erhalten.
-Gerätegruppen ersetzen weiterhin ihre Mitglieder; neue Geräte erscheinen hinten.
+Die Raumansicht behält auch mit individueller Sortierung ihre Abschnitte wie
+**Licht** und **Beschattung**. Innerhalb jedes Abschnitts gilt die gespeicherte
+Gerätereihenfolge. Die Abschnitte folgen dem jeweils ersten Gerät in dieser
+Reihenfolge; ohne individuelle Sortierung gilt die übliche Reihenfolge der
+Gerätetypen. Gerätegruppen ersetzen weiterhin ihre Mitglieder, auch unter
+„Ohne Raum“ bei verwaisten Raumzuordnungen. Neue Geräte erscheinen innerhalb
+ihres Abschnitts hinter den bereits sortierten Geräten.
 
 ## Geräteaktionen
 

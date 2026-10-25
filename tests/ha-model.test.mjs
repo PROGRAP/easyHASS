@@ -1164,6 +1164,30 @@ test('unassigned group is discovered from its room members and keeps its actual 
   assert.equal(rows[0].isSharedGroup, false);
 });
 
+test('orphaned native area IDs retain their HA group in the synthetic unassigned room', () => {
+  for (const parentDomain of ['light', 'group']) {
+    const parentId = `${parentDomain}.parent`;
+    const regs = registry([
+      { entity_id: 'light.orphan', device_id: 'orphan-device' },
+      { entity_id: parentId, area_id: 'a' },
+    ], undefined, [{ id: 'orphan-device', area_id: 'deleted-area' }]);
+    const states = {
+      'light.orphan': state('light.orphan', 'on'),
+      [parentId]: state(parentId, 'on', { entity_id: ['light.orphan'] }),
+    };
+    const home = deriveHome(regs, states);
+    const unassigned = home.rooms.find(room => room.id === UNASSIGNED_ROOM_ID);
+    assert.equal(unassigned.unassigned, true);
+    assert.deepEqual(unassigned.entities.map(entity => entity.id), ['light.orphan']);
+    const rows = deriveRoomDevices(unassigned, home.entities, home.entityScopes);
+    assert.deepEqual(rows.map(entity => entity.id), [parentId]);
+    assert.equal(rows[0].isGroup, true);
+    assert.equal(rows[0].memberCount, 1);
+    assert.equal(rows[0].isSharedGroup, true);
+    assert.equal(home.entityScopes['light.orphan'].areaId, 'deleted-area', 'native scope remains unchanged');
+  }
+});
+
 test('cross-room groups replace local members and clearly retain their complete shared scope', async () => {
   const regs = registry([
     { entity_id: 'light.shared' }, assigned('light.one'), { entity_id: 'light.two', area_id: 'b' },

@@ -1,6 +1,6 @@
 {
   "name": "easy-hass",
-  "version": "0.2.0-alpha.4",
+  "version": "0.2.0-alpha.5",
   "private": true,
   "license": "GPL-3.0-only",
   "type": "module",
@@ -13,7 +13,7 @@
     "dev": "node scripts/dev-server.mjs",
     "package": "npm run build && python3 scripts/package.py",
     "check": "node --check frontend/src/easy-hass.js && node --check frontend/src/room-detail.js && node --check frontend/src/room-photo.js && node --check frontend/src/image-palette.js && node --check frontend/src/room-motion.js && node --check frontend/src/control-morph.js && node --check frontend/src/control-label.js && node --check frontend/src/inline-controls.js && node --check frontend/src/area-sorter.js && node --check frontend/src/room-device-settings.js && node --check frontend/src/ha-model.js && node --check frontend/src/dom.js && node --check frontend/src/icons.js && node --check frontend/src/weather.js && node --check frontend/src/compatibility/navigation.js && node --check frontend/src/weather-data.js && node --check frontend/src/weather-detail.js && node --check frontend/src/weather-motion.js && node scripts/build.mjs --check",
-    "test": "node --test tests/ha-model.test.mjs tests/image-palette.test.mjs tests/weather.test.mjs tests/weather-data.test.mjs tests/weather-detail.test.mjs",
+    "test": "node --test tests/ha-model.test.mjs tests/room-detail.test.mjs tests/image-palette.test.mjs tests/weather.test.mjs tests/weather-data.test.mjs tests/weather-detail.test.mjs",
     "test:dom": "node --test tests/dom.test.mjs",
     "test:build": "node --test tests/build.test.mjs",
     "test:ha": "node scripts/ha-smoke.mjs",

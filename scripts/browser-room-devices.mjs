@@ -141,10 +141,11 @@ try {
   });
 
   await check('Mouse reordering saves once on drop and survives a full page reload', async () => {
-    const before = await listOrder(), expected = moved(before, before.indexOf(fixtures.cover.key), 0), storedBefore = await savedOrder();
-    assert.notDeepEqual(expected, before, 'Moving cover ahead of lights proves cross-domain order');
+    const before = await listOrder(), storedBefore = await savedOrder();
+    assert.deepEqual(before, [fixtures.binary.key, fixtures.light.key, fixtures.cover.key, fixtures.temperature.key]);
+    const expected = [fixtures.light.key, fixtures.cover.key, fixtures.binary.key, fixtures.temperature.key];
     const eventCount = settingsEvents.length;
-    await moveRow(fixtures.cover.key, before[0]); await expect.poll(visualOrder).toEqual(expected);
+    await moveRow(fixtures.binary.key, fixtures.cover.key); await expect.poll(visualOrder).toEqual(expected);
     assert.deepEqual(await savedOrder(), storedBefore, 'A held drag is only a preview');
     await drop('mouse'); await assertOrder(expected);
     await expect.poll(() => settingsEvents.length).toBe(eventCount + 1);
@@ -153,12 +154,13 @@ try {
     assert.equal((await ownArea()).name, name);
   });
 
-  await check('Room detail honors cross-domain order, retains climate only in its header and keeps targeted device gestures', async () => {
-    const order = await savedOrder(), controls = selected.filter(item => item !== fixtures.temperature);
-    const expected = order.filter(key => controls.some(item => item.key === key)).map(key => controls.find(item => item.key === key).entity.entity_id);
+  await check('An interleaved saved order keeps light and cover sections after reload, with ordered lights and targeted controls', async () => {
+    assert.deepEqual(await savedOrder(), [fixtures.light.key, fixtures.cover.key, fixtures.binary.key, fixtures.temperature.key]);
     await openDetail();
-    assert.deepEqual(await currentRoom.locator('.device-section h2').allTextContents(), ['Geräte']);
-    assert.deepEqual(await currentRoom.locator('[data-entity-row]').evaluateAll(nodes => nodes.map(node => node.dataset.entityRow)), expected);
+    assert.deepEqual(await currentRoom.locator('.device-section h2').allTextContents(), ['Licht', 'Beschattung']);
+    assert.deepEqual(await currentRoom.locator('.device-section').nth(0).locator('[data-entity-row]').evaluateAll(nodes => nodes.map(node => node.dataset.entityRow)), [fixtures.light.entity.entity_id, fixtures.binary.entity.entity_id]);
+    assert.deepEqual(await currentRoom.locator('.device-section').nth(1).locator('[data-entity-row]').evaluateAll(nodes => nodes.map(node => node.dataset.entityRow)), [fixtures.cover.entity.entity_id]);
+    await screenshot('sorted-grouped-detail');
     await expect(currentRoom.locator('[data-entity-row^="sensor."], [data-entity-row^="binary_sensor."]')).toHaveCount(0);
     const temperature = (await ha.call('get_states')).find(item => item.entity_id === fixtures.temperature.entity.entity_id);
     await expect(currentRoom.locator('.detail-climate')).toContainText(new Intl.NumberFormat('de-DE', { maximumFractionDigits: 1 }).format(Number(temperature.state)));

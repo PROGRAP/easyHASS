@@ -86,7 +86,16 @@ export function renderRoomDetail(room, devices, hass, { reading, current = true,
   if (!room) return `<header class="detail-header"><button class="room-back" data-room-back>${icon('back')}<span>Zuhause</span></button><h1 tabindex="-1">Raum nicht mehr vorhanden</h1></header><div class="empty-state">Dieser Raum ist in Home Assistant nicht mehr vorhanden.</div>`;
   const picture = pictureUrl(hass, room.picture);
   const buckets = new Map(sections.map(([id]) => [id, []]));
-  for (const entity of devices) buckets.get(sections.find(([, , domains]) => domains.includes(entity.domain))?.[0] || 'other').push(entity);
+  const sectionOrder = [];
+  for (const entity of devices) {
+    const sectionId = sections.find(([, , domains]) => domains.includes(entity.domain))?.[0] || 'other';
+    if (!buckets.get(sectionId).length) sectionOrder.push(sectionId);
+    buckets.get(sectionId).push(entity);
+  }
+  // Keep device types together after sorting. Each section follows its first
+  // ordered device; the order within a section is already supplied by the model.
+  const visibleSections = customOrder ? sectionOrder.map(id => sections.find(section => section[0] === id))
+    : sections.filter(([id]) => buckets.get(id).length);
   const row = entity => {
     const id = escape(entity.id);
     const state = stateLabel(entity, hass);
@@ -112,6 +121,6 @@ export function renderRoomDetail(room, devices, hass, { reading, current = true,
       </div>
     </header>
     ${status}
-    ${devices.length ? customOrder ? `<section class="device-section" aria-labelledby="devices-${escape(room.id)}-ordered"><h2 id="devices-${escape(room.id)}-ordered">Geräte</h2><div class="device-list">${devices.map(row).join('')}</div></section>` : sections.filter(([id]) => buckets.get(id).length).map(([id, label]) => `<section class="device-section" aria-labelledby="devices-${escape(room.id)}-${id}"><h2 id="devices-${escape(room.id)}-${id}">${label}</h2><div class="device-list">${buckets.get(id).map(row).join('')}</div></section>`).join('') : '<div class="empty-state"><p>In diesem Raum sind noch keine steuerbaren Geräte eingerichtet.</p></div>'}
+    ${devices.length ? visibleSections.map(([id, label]) => `<section class="device-section" aria-labelledby="devices-${escape(room.id)}-${id}"><h2 id="devices-${escape(room.id)}-${id}">${label}</h2><div class="device-list">${buckets.get(id).map(row).join('')}</div></section>`).join('') : '<div class="empty-state"><p>In diesem Raum sind noch keine steuerbaren Geräte eingerichtet.</p></div>'}
   </div>`;
 }

@@ -128,7 +128,7 @@ try {
     assert.deepEqual(await links(a), [fixtures.light.key]); assert.deepEqual(await links(c), [fixtures.light.key]); assert.deepEqual(await links(b), []);
   });
 
-  await check('Shared devices retain custom cross-domain order and target the same entity from both rooms', async () => {
+  await check('Shared devices keep ordered type sections after reload and target the same entity from both rooms', async () => {
     await share(a, fixtures.cover);
     const desired = [fixtures.cover.key, fixtures.light.key];
     await handle(fixtures.cover).focus(); await page.keyboard.press('Space'); await page.keyboard.press('Home'); await page.keyboard.press('Enter');
@@ -137,6 +137,8 @@ try {
     await expect(panel.locator('[data-settings-device-add]')).toBeEnabled();
     await screenshot('shared-list');
     await reload(); await detail(a);
+    assert.deepEqual(await current.locator('.device-section h2').allTextContents(), ['Beschattung', 'Licht']);
+    await screenshot('sorted-grouped-detail');
     assert.deepEqual(await current.locator('[data-entity-row]').evaluateAll(nodes => nodes.map(node => node.dataset.entityRow)), [fixtures.cover.entity.entity_id, fixtures.light.entity.entity_id]);
     for (const [area, fraction] of [[a, .72], [b, .38]]) {
       await detail(area);

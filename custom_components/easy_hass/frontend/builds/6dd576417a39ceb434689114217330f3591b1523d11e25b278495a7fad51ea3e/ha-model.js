@@ -684,7 +684,9 @@ export function deriveRoomDevices(room, allEntities = room.entities, entityScope
   // Additional single-device links grant only their explicit entity scope.
   // Inferring a foreign parent group from those members would silently widen
   // its controls to unlinked devices. Explicitly linked groups remain locals.
-  const scopeLocalIds = new Set();
+  // The synthetic room also contains orphaned non-null area IDs; its actual
+  // local members still supply native group scope, and it cannot have links.
+  const scopeLocalIds = new Set(room.unassigned ? localIds : []);
   for (const scope of scopes.values()) {
     if (scope.areaId === room.id || (room.unassigned && !scope.areaId)) scopeLocalIds.add(scope.id);
   }
