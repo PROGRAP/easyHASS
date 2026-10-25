@@ -85,6 +85,12 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
     async def set_order(self, area_id, keys, connection=None):
         return await self.request(connection or self.admin, "easy_hass/room_device_order/set", area_id=area_id, keys=keys)
 
+    async def set_link(self, area_id, key, linked, connection=None):
+        return await self.request(connection or self.admin, "easy_hass/room_device_link/set", area_id=area_id, key=key, linked=linked)
+
+    async def assign(self, key, area_id, expected_area_id, connection=None):
+        return await self.request(connection or self.admin, "easy_hass/room_device_assignment/set", key=key, area_id=area_id, expected_area_id=expected_area_id)
+
     def device(self, name, area_id=None):
         device = self.devices.async_get_or_create(
             config_entry_id=self.entry.entry_id, identifiers={("test", name)}, name=name,
@@ -101,7 +107,7 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_authenticated_reader_gets_defaults_but_cannot_write(self):
         await self.request(self.reader, "easy_hass/settings/get")
-        self.assertEqual(self.reader_messages[-1]["result"], {"hidden_area_ids": [], "room_device_order": {}})
+        self.assertEqual(self.reader_messages[-1]["result"], {"hidden_area_ids": [], "room_device_order": {}, "room_device_links": {}})
         before = dict(self.entry.options)
         await self.set_hidden(self.first.id, True, self.reader)
         self.assertFalse(self.reader_messages[-1]["success"])
@@ -116,7 +122,7 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
         other_admin.async_handle({"id": 1, "type": "easy_hass/room_visibility/set", "area_id": self.second.id, "hidden": True})
         await self.hass.async_block_till_done()
         self.assertEqual(self.entry.options["hidden_area_ids"], sorted([self.first.id, self.second.id]))
-        self.assertEqual(messages[-1]["result"], {"hidden_area_ids": sorted([self.first.id, self.second.id]), "room_device_order": {}})
+        self.assertEqual(messages[-1]["result"], {"hidden_area_ids": sorted([self.first.id, self.second.id]), "room_device_order": {}, "room_device_links": {}})
         await self.set_hidden(self.first.id, False)
         self.assertEqual(self.entry.options["hidden_area_ids"], [self.second.id])
         self.assertEqual(self.entry.options["unrelated"], {"preserved": True})
@@ -135,14 +141,14 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
         restored = make_entry(options=options)
         async_activate(self.hass, restored)
         await self.request(self.reader, "easy_hass/settings/get")
-        self.assertEqual(self.reader_messages[-1]["result"], {"hidden_area_ids": [self.first.id], "room_device_order": {}})
+        self.assertEqual(self.reader_messages[-1]["result"], {"hidden_area_ids": [self.first.id], "room_device_order": {}, "room_device_links": {}})
 
     async def test_subscription_has_initial_snapshot_crossclient_updates_and_real_unsubscribe(self):
         subscription = await self.request(self.reader, "easy_hass/settings/subscribe")
         self.assertEqual(self.reader_messages[-2], {"id": subscription, "type": "result", "success": True, "result": None})
-        self.assertEqual(self.reader_messages[-1], {"id": subscription, "type": "event", "event": {"hidden_area_ids": [], "room_device_order": {}}})
+        self.assertEqual(self.reader_messages[-1], {"id": subscription, "type": "event", "event": {"hidden_area_ids": [], "room_device_order": {}, "room_device_links": {}}})
         await self.set_hidden(self.first.id, True)
-        self.assertEqual(self.reader_messages[-1]["event"], {"hidden_area_ids": [self.first.id], "room_device_order": {}})
+        self.assertEqual(self.reader_messages[-1]["event"], {"hidden_area_ids": [self.first.id], "room_device_order": {}, "room_device_links": {}})
         events = len(self.reader_messages)
         await self.set_hidden(self.first.id, True)
         self.assertEqual(len(self.reader_messages), events, "an unchanged setting emits no duplicate event")
@@ -176,6 +182,8 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
             ("easy_hass/settings/subscribe", {}),
             ("easy_hass/room_visibility/set", {"area_id": self.first.id, "hidden": True}),
             ("easy_hass/room_device_order/set", {"area_id": self.first.id, "keys": []}),
+            ("easy_hass/room_device_link/set", {"area_id": self.first.id, "key": "device:test", "linked": False}),
+            ("easy_hass/room_device_assignment/set", {"area_id": self.first.id, "key": "device:test", "expected_area_id": None}),
         ):
             await self.request(self.admin, type_, **payload)
             self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_loaded")
@@ -185,7 +193,7 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
         await self.hass.async_block_till_done()
         self.assertEqual(self.reader_messages[-1]["type"], "event")
         await self.set_hidden(self.first.id, True)
-        self.assertEqual(self.reader_messages[-1]["event"], {"hidden_area_ids": [self.first.id], "room_device_order": {}})
+        self.assertEqual(self.reader_messages[-1]["event"], {"hidden_area_ids": [self.first.id], "room_device_order": {}, "room_device_links": {}})
 
     async def test_removed_references_are_pruned_without_overwriting_other_options(self):
         self.hass.config_entries.async_update_entry(self.entry, options={
@@ -294,6 +302,129 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
         self.devices.async_remove_device(device.id)
         await self.set_order(self.second.id, keys)
         self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_found")
+
+    async def test_links_merge_across_clients_are_persisted_and_unlink_only_one_reference(self):
+        device = self.device("Shared", self.first.id)
+        key = f"device:{device.id}"
+        third = self.registry.async_create("Third")
+        other, _ = self.connect(admin=True)
+        await self.request(self.reader, "easy_hass/settings/subscribe")
+        self.admin.async_handle({"id": 1, "type": "easy_hass/room_device_link/set", "area_id": self.second.id, "key": key, "linked": True})
+        other.async_handle({"id": 1, "type": "easy_hass/room_device_link/set", "area_id": third.id, "key": key, "linked": True})
+        await self.hass.async_block_till_done()
+        expected = {self.second.id: [key], third.id: [key]}
+        self.assertEqual(self.entry.options["room_device_links"], expected)
+        self.assertEqual(self.reader_messages[-1]["event"]["room_device_links"], expected)
+        events = len(self.reader_messages)
+        await self.set_link(self.second.id, key, True)
+        self.assertEqual(len(self.reader_messages), events)
+        await self.set_order(self.second.id, [key])
+        self.assertTrue(self.admin_messages[-1]["success"])
+        await self.set_hidden(self.second.id, True)
+        await self.hass.config_entries._store.async_save(self.hass.config_entries._data_to_save())
+        stored = json.loads((Path(self.directory.name) / ".storage/core.config_entries").read_text())
+        self.assertEqual(stored["data"]["entries"][0]["options"]["room_device_links"], expected)
+        await self.set_link(self.second.id, key, False)
+        self.assertEqual(self.entry.options["room_device_links"], {third.id: [key]})
+        self.assertEqual(self.entry.options["room_device_order"], {self.second.id: [key]})
+        self.assertEqual(self.entry.options["hidden_area_ids"], [self.second.id])
+        self.assertEqual(self.entry.options["unrelated"], {"preserved": True})
+        self.assertIs(self.devices.async_get(device.id), device)
+
+    async def test_link_and_assignment_permissions_and_stale_references_are_safe(self):
+        device = self.device("Permission", self.first.id)
+        key = f"device:{device.id}"
+        before = dict(self.entry.options)
+        await self.set_link(self.second.id, key, True, self.reader)
+        self.assertEqual(self.reader_messages[-1]["error"]["code"], "unauthorized")
+        await self.assign(key, self.second.id, self.first.id, self.reader)
+        self.assertEqual(self.reader_messages[-1]["error"]["code"], "unauthorized")
+        await self.set_link(self.second.id, "device:deleted", True)
+        self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_found")
+        await self.set_link(self.first.id, key, True)
+        self.assertEqual(self.admin_messages[-1]["error"]["code"], "conflict")
+        await self.set_link("deleted", key, False)
+        self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_found")
+        for malformed in ("bad", "entity:bad", "device: x"):
+            await self.set_link(self.second.id, malformed, True)
+            self.assertEqual(self.admin_messages[-1]["error"]["code"], "invalid_format")
+        await self.set_link(self.second.id, key, "true")
+        self.assertEqual(self.admin_messages[-1]["error"]["code"], "invalid_format")
+        self.assertEqual(dict(self.entry.options), before)
+        await self.set_link(self.second.id, key, True)
+        self.devices.async_remove_device(device.id)
+        await self.set_order(self.second.id, [key])
+        self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_found")
+        await self.set_link(self.second.id, key, False)
+        self.assertTrue(self.admin_messages[-1]["success"])
+        self.assertEqual(self.entry.options["room_device_links"], {})
+
+    async def test_atomic_assignment_checks_expected_source_and_only_clears_redundant_links(self):
+        device = self.device("Moving shared", self.first.id)
+        function = self.entity("light", "override", device=device, area_id=self.second.id)
+        key = f"device:{device.id}"
+        third = self.registry.async_create("Third")
+        await self.set_link(self.second.id, key, True)
+        await self.set_link(third.id, key, True)
+        before = dict(self.entry.options)
+        await self.assign(key, self.second.id, None)
+        self.assertEqual(self.admin_messages[-1]["error"]["code"], "conflict")
+        self.assertIs(self.devices.async_get(device.id), device)
+        self.assertEqual(dict(self.entry.options), before)
+        await self.assign(key, self.second.id, self.first.id)
+        self.assertTrue(self.admin_messages[-1]["success"])
+        self.assertEqual(self.devices.async_get(device.id).area_id, self.second.id)
+        self.assertIs(self.entities.async_get(function.entity_id), function)
+        self.assertEqual(self.entry.options["room_device_links"], {third.id: [key]})
+        # Simulate a native external move into an existing link target.
+        self.devices.async_update_device(device.id, area_id=third.id)
+        await self.assign(key, None, third.id)
+        self.assertTrue(self.admin_messages[-1]["success"])
+        self.assertIsNone(self.devices.async_get(device.id).area_id)
+        self.assertEqual(self.entry.options["room_device_links"], {})
+
+    async def test_two_same_loop_unassigned_choices_cannot_overwrite_each_other(self):
+        device = self.device("Race")
+        key = f"device:{device.id}"
+        other, messages = self.connect(admin=True)
+        self.admin.async_handle({"id": 1, "type": "easy_hass/room_device_assignment/set", "area_id": self.first.id, "key": key, "expected_area_id": None})
+        other.async_handle({"id": 1, "type": "easy_hass/room_device_assignment/set", "area_id": self.second.id, "key": key, "expected_area_id": None})
+        await self.hass.async_block_till_done()
+        self.assertTrue(self.admin_messages[-1]["success"])
+        self.assertEqual(messages[-1]["error"]["code"], "conflict")
+        self.assertEqual(self.devices.async_get(device.id).area_id, self.first.id)
+        await self.assign(key, "deleted", self.first.id)
+        self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_found")
+        self.assertEqual(self.devices.async_get(device.id).area_id, self.first.id)
+
+    async def test_single_member_link_cannot_authorize_foreign_parent_group_order(self):
+        device = self.device("Hidden member device", self.first.id)
+        member = self.entity("light", "hidden_member", device=device, hidden=True)
+        sibling = self.entity("light", "unlinked_sibling", area_id=self.first.id)
+        group = self.entity("light", "linked_group")
+        self.hass.states.async_set(group.entity_id, "on", {"entity_id": [member.entity_id, sibling.entity_id]})
+        await self.set_link(self.second.id, f"device:{device.id}", True)
+        await self.set_order(self.second.id, [f"device:{device.id}"])
+        self.assertTrue(self.admin_messages[-1]["success"])
+        await self.set_order(self.second.id, [f"entity:{group.entity_id}"])
+        self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_found")
+        self.assertEqual(self.entry.options["room_device_order"], {self.second.id: [f"device:{device.id}"]})
+        # The same check applies to visible members; only explicit group links
+        # or the existing native member inference may authorize the whole group.
+        self.entities.async_update_entity(member.entity_id, hidden_by=None)
+        await self.set_order(self.second.id, [f"entity:{group.entity_id}"])
+        self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_found")
+        await self.set_order(self.first.id, [f"entity:{group.entity_id}"])
+        self.assertTrue(self.admin_messages[-1]["success"])
+        await self.set_link(self.second.id, f"entity:{group.entity_id}", True)
+        await self.set_order(self.second.id, [f"entity:{group.entity_id}"])
+        self.assertTrue(self.admin_messages[-1]["success"])
+        await self.assign(f"entity:{group.entity_id}", self.second.id, None)
+        self.assertTrue(self.admin_messages[-1]["success"])
+        self.assertEqual(self.entities.async_get(group.entity_id).area_id, self.second.id)
+        self.assertEqual(self.entry.options["room_device_links"], {self.second.id: [f"device:{device.id}"]})
+        self.assertEqual(self.entities.async_get(member.entity_id).device_id, member.device_id)
+        self.assertEqual(self.entities.async_get(member.entity_id).area_id, member.area_id)
 
 
 if __name__ == "__main__":

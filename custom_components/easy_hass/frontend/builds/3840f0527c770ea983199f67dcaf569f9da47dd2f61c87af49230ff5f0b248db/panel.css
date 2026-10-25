@@ -693,6 +693,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .settings-device-search { margin-bottom: 8px; }
 .settings-device-note { margin-top: 12px; text-align: center; }
 .settings-device-empty { padding: 12px 0; }
+.settings-device-question { margin: 0 0 20px; color: var(--easy-muted); font-size: 14px; line-height: 21px; overflow-wrap: anywhere; }
+.settings-device-question strong { color: var(--easy-ink); font-weight: 500; }
+.settings-device-options { display: grid; gap: 8px; margin-bottom: 12px; }
+.settings-device-options .settings-row { padding: 16px; border-radius: 16px; background: var(--easy-background); }
+.settings-device-options .settings-row svg { flex-shrink: 0; }
+.settings-choice-cancel { display: block; width: 100%; min-height: 44px; margin-top: 8px; padding: 12px; border: 0; border-radius: 12px; color: var(--easy-muted); background: transparent; font-size: 14px; }
+.settings-choice-cancel:disabled { opacity: .45; }
 
 @media (min-width: 600px) {
   .page { padding-top: 36px; padding-left: 28px; padding-right: 28px; }

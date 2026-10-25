@@ -123,7 +123,9 @@ try {
     await panel.locator('[data-settings-page="devices"]').click();
     for (const item of selected) {
       await add.click(); await search.fill(item.device.name_by_user || item.device.name);
-      await assign(item.key).click(); await expect(title).toHaveText('Geräte');
+      await assign(item.key).click();
+      await panel.locator('[data-settings-device-mode="move"]').click();
+      await expect(title).toHaveText('Geräte');
       await expect.poll(() => deviceArea(item.device.id)).toBe(area.area_id);
       await expect(row(item.key)).toBeVisible();
     }

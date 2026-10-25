@@ -4,7 +4,7 @@ import { loadRegistries, subscribeRegistries, deriveHome, pictureUrl, toggleRoom
   deriveRoomDevices, entityControlTarget, toggleEntity, listRegisteredAreas, reorderAreas,
   createArea, updateArea, validateAreaName, AREA_NAME_MAX_LENGTH,
   subscribePanelSettings, setRoomHidden, listRoomAssignments, listAssignableDevices,
-  setDeviceRoom, setRoomDeviceOrder,
+  assignDeviceRoom, setRoomDeviceLink, setRoomDeviceOrder,
   uploadAreaImage, deleteUploadedAreaImage, validateAreaImageFile, AREA_IMAGE_ACCEPT } from './ha-model.js';
 import { icon, coverIcon, lightIcon } from './icons.js';
 import { weatherCondition } from './weather.js';
@@ -19,7 +19,7 @@ import { RoomPhotoPalette } from './room-photo.js';
 import { AreaSorter } from './area-sorter.js';
 import { InlineControls } from './inline-controls.js';
 import { controlValueLabel } from './control-label.js';
-import { renderRoomDeviceSettings } from './room-device-settings.js';
+import { renderRoomDeviceSettings, renderRoomDeviceChoice } from './room-device-settings.js';
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const number = (value, digits = 1) => new Intl.NumberFormat('de-DE', { maximumFractionDigits: digits }).format(value);
@@ -336,8 +336,9 @@ export class EasyHassPanel extends HTMLElement {
   _renderHome() {
     const weather = this._home.weather.find(entity => entity.available && isNumber(entity.attributes.temperature));
     const condition = weather && weatherCondition(weather.state, this._hass?.states?.['sun.sun']?.state);
-    const onCount = this._home.rooms.reduce((sum, room) => sum + room.light.onCount, 0);
-    const lightCount = this._home.rooms.reduce((sum, room) => sum + room.light.count, 0);
+    const lights = [...new Map(this._home.rooms.flatMap(room => room.lights).map(entity => [entity.id, entity])).values()];
+    const onCount = lights.filter(entity => entity.available && entity.state === 'on').length;
+    const lightCount = lights.length;
     const name = this._hass?.user?.name || '';
     return `<header class="welcome"><h1>Willkommen Zuhause${name ? `<span>${escape(name)}</span>` : ''}</h1>
       <div class="summary">${weather ? `<button type="button" class="summary-chip weather-summary" data-weather-open="${escape(weather.id)}" aria-haspopup="dialog" aria-expanded="${!!this._weatherOpen}" aria-controls="weather-dialog">${icon(condition.icon)}<span class="summary-chip-text"><span class="summary-chip-title">Wetter</span><span class="summary-chip-status">${escape(condition.label)} · ${number(Number(weather.attributes.temperature))} ${escape(weather.attributes.temperature_unit || this._hass?.config?.unit_system?.temperature || '°')}</span></span></button>` : ''}
@@ -560,11 +561,16 @@ export class EasyHassPanel extends HTMLElement {
     const settingsPage = event.target.closest('[data-settings-page]:not(:disabled)');
     if (settingsPage) { this._showSheet(settingsPage.dataset.settingsPage); return; }
     if (event.target.closest('[data-settings-device-add]:not(:disabled)')) {
-      this._deviceQuery = ''; this._deviceError = null;
+      this._deviceQuery = ''; this._deviceError = null; this._deviceChoice = null;
       this._showSheet('add-device', '#settings-device-search'); return;
     }
     const assignDevice = event.target.closest('[data-settings-device-assign]:not(:disabled)');
-    if (assignDevice) { this._assignRoomDevice(assignDevice.dataset.settingsDeviceAssign, false); return; }
+    if (assignDevice) { this._chooseRoomDevice(assignDevice.dataset.settingsDeviceAssign); return; }
+    if (event.target.closest('[data-settings-choice-cancel]:not(:disabled)')) { this._sheetBack(); return; }
+    const deviceMode = event.target.closest('[data-settings-device-mode]:not(:disabled)');
+    if (deviceMode && this._deviceChoice) {
+      this._assignRoomDevice(this._deviceChoice.key, false, deviceMode.dataset.settingsDeviceMode); return;
+    }
     const removeDevice = event.target.closest('[data-settings-device-remove]:not(:disabled)');
     if (removeDevice) { this._assignRoomDevice(removeDevice.dataset.settingsDeviceRemove, true); return; }
     if (event.target.closest('[data-settings-picture]:not(:disabled)')) {
@@ -1000,8 +1006,9 @@ export class EasyHassPanel extends HTMLElement {
     this._showSheet('more');
   }
   _showSheet(page, focusSelector) {
-    if (!['more', 'settings', 'rooms', 'create', 'edit', 'devices', 'add-device'].includes(page)) return;
-    if (['devices', 'add-device'].includes(page) && !this._areaDraft?.id) return;
+    if (!['more', 'settings', 'rooms', 'create', 'edit', 'devices', 'add-device', 'assign-device'].includes(page)) return;
+    if (['devices', 'add-device', 'assign-device'].includes(page) && !this._areaDraft?.id) return;
+    if (page === 'assign-device' && !this._deviceChoice) return;
     if (this._weatherOpen) this._disposeWeather();
     this._inlineControls?.cancel();
     this._areaSorter?.cancel();
@@ -1040,9 +1047,9 @@ export class EasyHassPanel extends HTMLElement {
   _renderSettings() {
     const page = this._sheetPage;
     const form = page === 'create' || page === 'edit';
-    const title = { settings: 'Einstellungen', rooms: 'Räume', create: 'Neuer Raum', edit: 'Raum bearbeiten', devices: 'Geräte', 'add-device': 'Gerät hinzufügen' }[page];
+    const title = { settings: 'Einstellungen', rooms: 'Räume', create: 'Neuer Raum', edit: 'Raum bearbeiten', devices: 'Geräte', 'add-device': 'Gerät hinzufügen', 'assign-device': 'Gerät hinzufügen' }[page];
     const backLabel = page === 'settings' ? 'Zurück zu Mehr' : page === 'rooms' ? 'Zurück zu Einstellungen'
-      : page === 'devices' ? 'Zurück zum Raum' : page === 'add-device' ? 'Zurück zu Geräte' : 'Zurück zur Raumliste';
+      : page === 'devices' ? 'Zurück zum Raum' : page === 'add-device' ? 'Zurück zu Geräte' : page === 'assign-device' ? 'Zurück zur Geräteauswahl' : 'Zurück zur Raumliste';
     const canEdit = this._hass?.user?.is_admin === true && this._hass?.connected === true;
     const disabled = !canEdit || !!this._areaSave || !!this._areaOrderSave || !!this._deviceSave;
     const help = !this._hass?.user?.is_admin ? 'Räume können nur von Administratoren bearbeitet werden.'
@@ -1061,12 +1068,24 @@ export class EasyHassPanel extends HTMLElement {
           : '<p class="settings-help">Noch keine Räume vorhanden.</p>';
       content += `<span class="sr-only" id="settings-order-hint">Am Griff ziehen zum Sortieren. Mit der Tastatur Leertaste oder Enter drücken, mit den Pfeiltasten verschieben und erneut bestätigen. Escape bricht ab.</span><span class="sr-only" id="settings-order-status" role="status" aria-live="polite" aria-atomic="true">${escape(this._areaOrderStatus)}</span>${this._areaOrderError ? `<p class="settings-error" id="settings-order-error" role="alert">${escape(this._areaOrderError)}</p>` : ''}`;
       content += `${help ? `<p class="settings-help" role="status">${escape(help)}</p>` : ''}<button type="button" class="settings-new" data-settings-new ${disabled ? 'disabled' : ''}>${icon('plus')}<span>Neu</span></button>`;
+    } else if (page === 'assign-device') {
+      const area = listRegisteredAreas(this._registries).find(item => item.id === this._areaDraft?.id);
+      const current = this._assignableRoomDevices().find(item => item.key === this._deviceChoice?.key);
+      const changed = !current || current.areaId !== this._deviceChoice?.areaId;
+      content = renderRoomDeviceChoice({ item: this._deviceChoice, areaName: area?.name || this._areaDraft?.name,
+        disabled: disabled || changed || !area || !this._panelSettings || !!this._panelSettingsError,
+        saving: !!this._deviceSave,
+        error: !area ? 'Dieser Raum ist nicht mehr vorhanden.' : changed && !this._deviceSave
+          ? 'Die Zuordnung dieses Geräts hat sich geändert. Bitte wähle es erneut aus.' : this._deviceError,
+        help: help || this._panelSettingsError,
+      });
     } else if (page === 'devices' || page === 'add-device') {
       const area = listRegisteredAreas(this._registries).find(item => item.id === this._areaDraft?.id);
       content = renderRoomDeviceSettings({
         areaName: area?.name || this._areaDraft?.name, adding: page === 'add-device',
-        items: page === 'devices' ? this._roomAssignments() : listAssignableDevices(this._registries || {}, this._hass?.states || {}, this._areaDraft?.id),
-        query: this._deviceQuery, disabled, saving: this._deviceSave, error: this._deviceError,
+        items: page === 'devices' ? this._roomAssignments() : this._assignableRoomDevices(),
+        query: this._deviceQuery, disabled: disabled || !this._panelSettings || !!this._panelSettingsError,
+        saving: this._deviceSave, error: this._deviceError,
         orderingDisabled: disabled || !this._panelSettings || !!this._panelSettingsError,
         handleDisabled: !canEdit || !this._panelSettings || !!this._panelSettingsError,
         status: this._deviceOrderStatus, help: help || this._panelSettingsError,
@@ -1114,6 +1133,12 @@ export class EasyHassPanel extends HTMLElement {
     if (!sheet.contains(active) || active?.disabled) sheet.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
   }
   _sheetBack() {
+    if (this._sheetPage === 'assign-device') {
+      const key = this._deviceChoice?.key;
+      const available = this._assignableRoomDevices().some(item => item.key === key);
+      this._deviceChoice = null; this._deviceError = null;
+      this._showSheet('add-device', available ? `[data-settings-device-assign="${CSS.escape(key)}"]` : '#settings-device-search'); return;
+    }
     if (this._sheetPage === 'add-device') { this._deviceError = null; this._showSheet('devices', '[data-settings-device-add]'); return; }
     if (this._sheetPage === 'devices') { this._deviceError = null; this._showSheet('edit', '[data-settings-page="devices"]'); return; }
     if (this._sheetPage === 'more') { this._closeSheet(); return; }
@@ -1144,11 +1169,14 @@ export class EasyHassPanel extends HTMLElement {
     const areaId = this._areaDraft?.id;
     const order = this._deviceSave?.areaId === areaId && this._deviceSave.keys
       ? this._deviceSave.keys : this._roomDeviceOrder(areaId);
-    return listRoomAssignments(this._registries || {}, this._hass?.states || {}, areaId, order);
+    return listRoomAssignments(this._registries || {}, this._hass?.states || {}, areaId, order, this._panelSettings);
+  }
+  _assignableRoomDevices() {
+    return listAssignableDevices(this._registries || {}, this._hass?.states || {}, this._areaDraft?.id, this._panelSettings);
   }
   _canEditRoomDevices() {
     return this._hass?.connected === true && this._hass?.user?.is_admin === true
-      && !this._deviceSave && !this._areaSave && !this._areaOrderSave
+      && !this._deviceSave && !this._areaSave && !this._areaOrderSave && !!this._panelSettings && !this._panelSettingsError
       && listRegisteredAreas(this._registries).some(area => area.id === this._areaDraft?.id);
   }
   _announceDeviceOrder(text) {
@@ -1156,27 +1184,53 @@ export class EasyHassPanel extends HTMLElement {
     const status = this.shadowRoot.getElementById('settings-device-order-status');
     if (status) status.textContent = text;
   }
-  async _assignRoomDevice(key, remove) {
+  _chooseRoomDevice(key) {
     if (!this._canEditRoomDevices()) return;
-    const draft = this._areaDraft, areaId = draft.id;
-    const items = remove ? this._roomAssignments()
-      : listAssignableDevices(this._registries, this._hass?.states || {}, areaId);
+    const item = this._assignableRoomDevices().find(item => item.key === key);
+    if (!item) return;
+    this._deviceError = null;
+    if (item.areaId) {
+      this._deviceChoice = { ...item };
+      this._showSheet('assign-device', '[data-settings-device-mode="additional"]');
+    } else this._assignRoomDevice(key, false, 'move');
+  }
+  async _assignRoomDevice(key, remove, mode = 'move') {
+    if (!this._canEditRoomDevices()) return;
+    if (!['move', 'additional'].includes(mode)) return;
+    const draft = this._areaDraft, areaId = draft.id, page = this._sheetPage;
+    const items = remove ? this._roomAssignments() : this._assignableRoomDevices();
     const item = items.find(item => item.key === key);
     if (!item || (remove && item.canRemove === false)) return;
+    const choice = this._deviceChoice;
+    // Assigned devices always require an explicit choice with the same source.
+    if (!remove && item.areaId && (page !== 'assign-device' || choice?.key !== key || choice.areaId !== item.areaId)) {
+      this._chooseRoomDevice(key); return;
+    }
+    if (!remove && page === 'assign-device' && (choice?.key !== key || choice.areaId !== item.areaId)) {
+      this._deviceError = 'Die Zuordnung dieses Geräts hat sich geändert. Bitte wähle es erneut aus.';
+      this._renderSheet(); return;
+    }
     const hass = this._hass, connection = hass.connection;
     const request = this._deviceSave = { areaId, key };
     this._deviceError = null; this._renderSheet();
     let saved = false;
     try {
-      await setDeviceRoom(hass, key, remove ? null : areaId);
+      const settings = remove && item.isAdditional ? await setRoomDeviceLink(hass, areaId, key, false)
+        : !remove && mode === 'additional' ? await setRoomDeviceLink(hass, areaId, key, true)
+          : await assignDeviceRoom(hass, key, remove ? null : areaId, item.areaId || null);
       saved = true;
+      if (this._deviceSave !== request || !this.isConnected || connection !== this._hass?.connection) return;
+      this._acceptPanelSettings(settings);
       const revision = this._registryRevision;
       const registries = await loadRegistries(hass);
       if (this._deviceSave !== request || !this.isConnected || connection !== this._hass?.connection) return;
       if (revision === this._registryRevision) this._registries = registries;
       if (this._areaDraft === draft && this._sheetOpen) {
-        this._announceDeviceOrder(remove ? `Die Raumzuordnung von ${item.name} wurde entfernt.` : `${item.name} wurde hinzugefügt.`);
-        if (!remove && this._sheetPage === 'add-device') this._showSheet('devices', '[data-settings-device-add]');
+        this._announceDeviceOrder(remove ? item.isAdditional ? `Die zusätzliche Anzeige von ${item.name} wurde entfernt.`
+          : `Die Raumzuordnung von ${item.name} wurde entfernt.` : `${item.name} wurde hinzugefügt.`);
+        if (!remove && this._sheetPage === page && ['add-device', 'assign-device'].includes(page)) {
+          this._deviceChoice = null; this._showSheet('devices', '[data-settings-device-add]');
+        }
       }
     } catch (error) {
       if (this._deviceSave === request && this.isConnected && connection === this._hass?.connection && this._areaDraft === draft) {
@@ -1258,7 +1312,7 @@ export class EasyHassPanel extends HTMLElement {
   _discardAreaDraft() {
     const draft = this._areaDraft;
     this._areaDraft = null; this._areaError = null;
-    this._deviceQuery = ''; this._deviceError = null; this._deviceOrderStatus = '';
+    this._deviceQuery = ''; this._deviceError = null; this._deviceOrderStatus = ''; this._deviceChoice = null;
     if (!draft) return;
     draft.pictureVersion = (draft.pictureVersion || 0) + 1;
     if (draft.picturePreview) URL.revokeObjectURL(draft.picturePreview);

@@ -42,11 +42,11 @@ function panelSettings(value) {
     throw new Error('Home Assistant hat ungültige Anzeigeeinstellungen geliefert.');
   }
   const result = { hidden_area_ids: [...ids] };
-  // Older EasyHASS backends did not include ordering in settings snapshots.
-  if (value.room_device_order !== undefined) {
-    const orders = value.room_device_order;
-    if (!orders || typeof orders !== 'object' || Array.isArray(orders)) throw new Error('Home Assistant hat ungültige Gerätereihenfolgen geliefert.');
-    result.room_device_order = Object.fromEntries(Object.entries(orders).map(([areaId, keys]) => {
+  // Optional maps keep older settings snapshots compatible.
+  for (const field of ['room_device_order', 'room_device_links']) if (value[field] !== undefined) {
+    const values = value[field];
+    if (!values || typeof values !== 'object' || Array.isArray(values)) throw new Error('Home Assistant hat ungültige Geräteeinstellungen geliefert.');
+    result[field] = Object.fromEntries(Object.entries(values).map(([areaId, keys]) => {
       validatedAreaId(areaId);
       return [areaId, validatedAssignmentOrder(keys)];
     }));
@@ -175,11 +175,15 @@ function sortAssignments(items, order) {
  * A group inferred from its members is sortable, but removing its own null/foreign
  * area would not remove those memberships; canRemove makes that distinction clear.
  */
-export function listRoomAssignments(registries, states = {}, areaId, order = []) {
+export function listRoomAssignments(registries, states = {}, areaId, order = [], settings = {}) {
   if (!listRegisteredAreas(registries).some(area => area.id === areaId)) return [];
   const all = assignmentItems(registries, states), items = new Map();
-  for (const item of all) if (item.areaId === areaId) items.set(item.key, { ...item, canRemove: true });
-  const room = deriveRooms(registries, states).find(candidate => candidate.id === areaId);
+  const links = new Set(settings?.room_device_links?.[areaId] || []);
+  for (const item of all) {
+    if (item.areaId === areaId) items.set(item.key, { ...item, canRemove: true, isAdditional: false });
+    else if (links.has(item.key)) items.set(item.key, { ...item, canRemove: true, isAdditional: true });
+  }
+  const room = deriveRooms(registries, states, settings).find(candidate => candidate.id === areaId);
   const rows = deriveRoomDevices(room, deriveEntities(registries, states), deriveEntityScopes(registries, states));
   for (const entity of rows) {
     const key = entity.deviceId ? `device:${entity.deviceId}` : `entity:${entity.id}`;
@@ -191,9 +195,10 @@ export function listRoomAssignments(registries, states = {}, areaId, order = [])
 }
 
 /** Picker candidates retain their real current room; assigning moves that scope. */
-export function listAssignableDevices(registries, states = {}, areaId) {
+export function listAssignableDevices(registries, states = {}, areaId, settings = {}) {
   if (!listRegisteredAreas(registries).some(area => area.id === areaId)) return [];
-  return sortAssignments(assignmentItems(registries, states).filter(item => item.areaId !== areaId), []);
+  const links = new Set(settings?.room_device_links?.[areaId] || []);
+  return sortAssignments(assignmentItems(registries, states).filter(item => item.areaId !== areaId && !links.has(item.key)), []);
 }
 
 /** Only native area_id changes. Entity overrides on physical devices are retained.
@@ -216,6 +221,28 @@ export async function setRoomDeviceOrder(hass, areaId, keys) {
   requireAreaWrite(hass);
   const id = validatedAreaId(areaId), order = validatedAssignmentOrder(keys);
   return panelSettings(await hass.callWS({ type: 'easy_hass/room_device_order/set', area_id: id, keys: order }));
+}
+
+/** Additional display scope only; the original native HA assignment is untouched. */
+export async function setRoomDeviceLink(hass, areaId, key, linked) {
+  requireAreaWrite(hass);
+  const id = validatedAreaId(areaId);
+  assignmentKey(key);
+  if (typeof linked !== 'boolean') throw new TypeError('Die zusätzliche Anzeige muss ein Wahrheitswert sein.');
+  return panelSettings(await hass.callWS({ type: 'easy_hass/room_device_link/set', area_id: id, key, linked }));
+}
+
+/** Atomic server-side compare-and-assign, including an expected unassigned null.
+ * Returns the settings snapshot after removing a redundant destination link.
+ * Other extra-room links and native entity overrides stay unchanged.
+ */
+export async function assignDeviceRoom(hass, key, areaId, expectedAreaId) {
+  requireAreaWrite(hass);
+  assignmentKey(key);
+  const area = areaId === null ? null : validatedAreaId(areaId);
+  const expected = expectedAreaId === null ? null : validatedAreaId(expectedAreaId);
+  return panelSettings(await hass.callWS({ type: 'easy_hass/room_device_assignment/set', key,
+    area_id: area, expected_area_id: expected }));
 }
 
 export function validateAreaName(value) {
@@ -586,11 +613,17 @@ function makeRoom(area, roomEntities, allEntities, unassigned = false) {
 }
 
 /** Preserve the user's HA area order and keep empty areas. */
-export function deriveRooms(registries, states = {}) {
+export function deriveRooms(registries, states = {}, settings = {}) {
   const entities = deriveEntities(registries, states);
   const areas = entries(registries?.areas);
   const areaIds = new Set(areas.map((area) => area.area_id || area.id));
-  const rooms = areas.map((area) => makeRoom(area, entities.filter((entity) => entity.areaId === (area.area_id || area.id)), entities));
+  const eligibleKeys = new Set(assignmentItems(registries, states).map(item => item.key));
+  const rooms = areas.map((area) => {
+    const areaId = area.area_id || area.id;
+    const links = new Set((settings?.room_device_links?.[areaId] || []).filter(key => eligibleKeys.has(key)));
+    const linked = entity => links.has(`entity:${entity.id || entity.entity_id}`) || links.has(`device:${entity.deviceId || entity.device_id}`);
+    return makeRoom(area, entities.filter(entity => entity.areaId === areaId || linked(entity)), entities);
+  });
   const unassigned = entities.filter((entity) => !areaIds.has(entity.areaId) && !entity.category && (
     ['light', 'cover', 'climate', 'fan', 'switch', 'vacuum'].includes(entity.domain)
     || (entity.domain === 'sensor' && ['temperature', 'humidity'].includes(entity.deviceClass))
@@ -621,7 +654,7 @@ export function deriveHome(registries, states = {}, settings = {}) {
   return {
     // Visibility affects room navigation only. Keep topology for shared groups
     // and leave independent sections such as the robot list fully available.
-    rooms: deriveRooms(registries, states).filter(room => room.unassigned || !hidden.has(room.id)),
+    rooms: deriveRooms(registries, states, settings).filter(room => room.unassigned || !hidden.has(room.id)),
     entities, entityScopes: deriveEntityScopes(registries, states),
     vacuums: entities.filter((entity) => entity.domain === 'vacuum'),
     weather: entities.filter((entity) => entity.domain === 'weather'),
@@ -648,7 +681,10 @@ export function deriveRoomDevices(room, allEntities = room.entities, entityScope
   const isGroup = (entity) => entity.domain === 'group' || memberIds(entity).length > 0;
   const scopes = new Map([...all.values()].map((entity) => [entity.id, { id: entity.id, areaId: entity.areaId, memberIds: memberIds(entity) }]));
   for (const scope of entries(entityScopes)) scopes.set(scope.id, scope);
-  const scopeLocalIds = new Set(localIds);
+  // Additional single-device links grant only their explicit entity scope.
+  // Inferring a foreign parent group from those members would silently widen
+  // its controls to unlinked devices. Explicitly linked groups remain locals.
+  const scopeLocalIds = new Set();
   for (const scope of scopes.values()) {
     if (scope.areaId === room.id || (room.unassigned && !scope.areaId)) scopeLocalIds.add(scope.id);
   }

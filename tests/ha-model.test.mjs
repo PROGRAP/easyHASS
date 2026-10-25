@@ -8,6 +8,7 @@ import {
   deriveRoomDevices, entityControlTarget, toggleEntity,
   listRegisteredAreas, createArea, renameArea, reorderAreas, AREA_NAME_MAX_LENGTH,
   listRoomAssignments, listAssignableDevices, setDeviceRoom, setRoomDeviceOrder,
+  setRoomDeviceLink, assignDeviceRoom,
   updateArea, validateAreaName, validateAreaImageFile, uploadAreaImage, deleteUploadedAreaImage,
   AREA_IMAGE_ACCEPT, AREA_IMAGE_MAX_BYTES,
 } from '../frontend/src/ha-model.js';
@@ -160,6 +161,149 @@ test('order WS writes use exact keys, reset one area, copy response and preserve
   await assert.rejects(setRoomDeviceOrder({ ...hass, callWS: async () => { throw error; } }, 'a', []), value => value === error);
   for (const room_device_order of [null, [], { a: ['device:x', 'device:x'] }, { a: ['sensor.raw'] }, { [UNASSIGNED_ROOM_ID]: [] }])
     await assert.rejects(loadPanelSettings({ ...hass, callWS: async () => ({ hidden_area_ids: [], room_device_order }) }));
+});
+
+test('additional physical devices contribute controls and climate without changing native areas or global entities', () => {
+  const regs = registry([
+    { entity_id: 'light.lamp', device_id: 'multi' },
+    { entity_id: 'cover.shade', device_id: 'multi', area_id: 'b' },
+    { entity_id: 'sensor.temperature', device_id: 'multi' },
+    { entity_id: 'sensor.humidity', device_id: 'multi' },
+  ], [{ area_id: 'a', name: 'A' }, { area_id: 'b', name: 'B' }, { area_id: 'c', name: 'C' }], [{ id: 'multi', area_id: 'a', name: 'Multi' }]);
+  const states = {
+    'light.lamp': state('light.lamp', 'on', { brightness: 128, supported_color_modes: ['brightness'] }),
+    'cover.shade': state('cover.shade', 'open', { supported_features: 15, current_position: 75 }),
+    'sensor.temperature': state('sensor.temperature', '21', { device_class: 'temperature', unit_of_measurement: '°C' }),
+    'sensor.humidity': state('sensor.humidity', '48', { device_class: 'humidity', unit_of_measurement: '%' }),
+  };
+  const before = structuredClone(regs), plain = deriveHome(regs, states);
+  const settings = { room_device_links: { b: ['device:multi'], c: ['device:multi'] } };
+  const home = deriveHome(regs, states, settings), room = home.rooms.find(room => room.id === 'b');
+  assert.deepEqual(home.entities, plain.entities);
+  assert.deepEqual(home.entityScopes, plain.entityScopes);
+  assert.deepEqual(regs, before);
+  assert.equal(room.entities.length, 4, 'native override plus link is one cover entity');
+  assert.equal(new Set(room.entities.map(entity => entity.id)).size, 4);
+  assert.equal(room.light.brightness, 50);
+  assert.equal(room.cover.position, 75);
+  assert.equal(room.temperature.value, 21);
+  assert.equal(room.humidity.value, 48);
+  assert.deepEqual(deriveRoomDevices(room, home.entities, home.entityScopes).map(entity => entity.id), ['cover.shade', 'light.lamp']);
+  const item = listRoomAssignments(regs, states, 'b', [], settings)[0];
+  assert.equal(item.isAdditional, true);
+  assert.equal(item.canRemove, true);
+  assert.equal(item.areaId, 'a');
+  assert.deepEqual(listAssignableDevices(regs, states, 'b', settings), []);
+  const withoutB = deriveHome(regs, states, { room_device_links: { c: ['device:multi'] } });
+  assert.equal(withoutB.rooms[1].light.count, 0);
+  assert.equal(withoutB.rooms[1].cover.count, 1, 'native override survives unlink');
+  assert.equal(withoutB.rooms[2].light.count, 1);
+});
+
+test('explicit group and member links overlap once and retain the real group target', async () => {
+  const regs = registry([
+    { entity_id: 'light.member', device_id: 'lamp' },
+    { entity_id: 'light.group', area_id: 'a' },
+  ], [{ area_id: 'a', name: 'A' }, { area_id: 'b', name: 'B' }], [{ id: 'lamp', area_id: 'a', name: 'Lamp' }]);
+  const states = {
+    'light.member': state('light.member', 'on', { supported_color_modes: ['brightness'], brightness: 128 }),
+    'light.group': state('light.group', 'on', { entity_id: ['light.member'], supported_color_modes: ['brightness'], brightness: 128 }),
+  };
+  const settings = { room_device_links: { b: ['device:lamp', 'entity:light.group'] } };
+  const home = deriveHome(regs, states, settings), room = home.rooms[1];
+  assert.deepEqual(room.lights.map(entity => entity.id), ['light.group']);
+  const detail = deriveRoomDevices(room, home.entities, home.entityScopes);
+  assert.deepEqual(detail.map(entity => entity.id), ['light.group']);
+  const hass = mockHass(states);
+  await setRoomBrightness(hass, entityControlTarget(detail[0]), 70);
+  assert.deepEqual(hass.calls[0][2].entity_id, ['light.group']);
+  regs.entities[0].hidden_by = 'integration';
+  const hidden = deriveHome(regs, states, { room_device_links: { b: ['device:lamp'] } });
+  assert.deepEqual(hidden.rooms[1].entities, []);
+  assert.deepEqual(deriveRoomDevices(hidden.rooms[1], hidden.entities, hidden.entityScopes), [], 'hidden linked member cannot infer an unlinked parent');
+});
+
+test('an additional single member never widens into its foreign group or unlinked sibling', async () => {
+  const regs = registry([
+    { entity_id: 'light.member', device_id: 'lamp' },
+    { entity_id: 'light.other', area_id: 'a' },
+    { entity_id: 'light.group', area_id: 'a' },
+  ], [{ area_id: 'a', name: 'A' }, { area_id: 'b', name: 'B' }], [{ id: 'lamp', area_id: 'a', name: 'Lamp' }]);
+  const states = {
+    'light.member': state('light.member', 'on', { supported_color_modes: ['brightness'], brightness: 128 }),
+    'light.other': state('light.other', 'on', { supported_color_modes: ['brightness'], brightness: 200 }),
+    'light.group': state('light.group', 'on', { entity_id: ['light.member', 'light.other'], supported_color_modes: ['brightness'], brightness: 160 }),
+  };
+  const settings = { room_device_links: { b: ['device:lamp'] } };
+  const home = deriveHome(regs, states, settings), room = home.rooms[1];
+  const detail = deriveRoomDevices(room, home.entities, home.entityScopes);
+  assert.deepEqual(room.lights.map(entity => entity.id), ['light.member']);
+  assert.deepEqual(detail.map(entity => entity.id), ['light.member']);
+  assert.deepEqual(listRoomAssignments(regs, states, 'b', [], settings).map(item => item.key), ['device:lamp']);
+  const hass = mockHass(states);
+  await setRoomBrightness(hass, room, 70);
+  await setRoomBrightness(hass, entityControlTarget(detail[0]), 80);
+  assert.deepEqual(hass.calls.map(call => call[2].entity_id), [['light.member'], ['light.member']]);
+  assert.deepEqual(deriveRoomDevices(home.rooms[0], home.entities, home.entityScopes).map(entity => entity.id), ['light.group'], 'native inference is retained');
+  settings.room_device_links.b.push('entity:light.group');
+  const explicit = deriveHome(regs, states, settings);
+  assert.deepEqual(explicit.rooms[1].lights.map(entity => entity.id), ['light.group']);
+  assert.deepEqual(deriveRoomDevices(explicit.rooms[1], explicit.entities, explicit.entityScopes).map(entity => entity.id), ['light.group']);
+});
+
+test('deleted, hidden and disabled extra references do not become room rows or picker exclusions for native items', () => {
+  const regs = assignmentFixture(), settings = { room_device_links: { b: [
+    'device:deleted', 'device:disabled', 'entity:light.hidden', 'entity:light.disabled', 'entity:sensor.raw',
+  ] } };
+  assert.deepEqual(deriveHome(regs, {}, settings), deriveHome(regs));
+  assert.deepEqual(listRoomAssignments(regs, {}, 'b', [], settings), listRoomAssignments(regs, {}, 'b'));
+  const redundant = { room_device_links: { a: ['device:lamp'] } };
+  const item = listRoomAssignments(regs, {}, 'a', [], redundant).find(item => item.key === 'device:lamp');
+  assert.equal(item.isAdditional, false, 'external native move into an extra target is represented as native');
+  assert.equal(item.canRemove, true);
+});
+
+test('additional assignment order is applied to the same actual device/entity keys', () => {
+  const regs = assignmentFixture(), settings = { room_device_links: { b: ['entity:switch.independent'] } };
+  const home = deriveHome(regs, {}, settings), order = ['entity:switch.independent', 'device:lamp'];
+  assert.deepEqual(deriveRoomDevices(home.rooms[1], home.entities, home.entityScopes, order).map(entity => entity.id),
+    ['switch.independent', 'light.control']);
+  assert.deepEqual(listRoomAssignments(regs, {}, 'b', order, settings).map(item => item.key), order);
+});
+
+test('link and atomic assign helpers send exact requests, copy snapshots and preserve conflict errors', async () => {
+  const response = { hidden_area_ids: [], room_device_order: {}, room_device_links: { b: ['device:lamp'] } }, calls = [];
+  const hass = { connected: true, user: { is_admin: true }, callWS: async payload => { calls.push(payload); return response; } };
+  const result = await setRoomDeviceLink(hass, 'b', 'device:lamp', true);
+  await setRoomDeviceLink(hass, 'b', 'device:lamp', false);
+  await assignDeviceRoom(hass, 'device:lamp', 'b', 'a');
+  await assignDeviceRoom(hass, 'entity:light.group', 'b', null);
+  await assignDeviceRoom(hass, 'device:lamp', null, 'b');
+  assert.deepEqual(calls, [
+    { type: 'easy_hass/room_device_link/set', area_id: 'b', key: 'device:lamp', linked: true },
+    { type: 'easy_hass/room_device_link/set', area_id: 'b', key: 'device:lamp', linked: false },
+    { type: 'easy_hass/room_device_assignment/set', key: 'device:lamp', area_id: 'b', expected_area_id: 'a' },
+    { type: 'easy_hass/room_device_assignment/set', key: 'entity:light.group', area_id: 'b', expected_area_id: null },
+    { type: 'easy_hass/room_device_assignment/set', key: 'device:lamp', area_id: null, expected_area_id: 'b' },
+  ]);
+  response.room_device_links.b.push('entity:light.other');
+  assert.deepEqual(result.room_device_links.b, ['device:lamp']);
+  const failure = { code: 'conflict', message: 'Native room changed' };
+  await assert.rejects(assignDeviceRoom({ ...hass, callWS: async () => { throw failure; } }, 'device:lamp', 'b', null), error => error === failure);
+});
+
+test('link and atomic assign validate admin, connection, keys, booleans and explicit expected source before writes', async () => {
+  let requests = 0;
+  const hass = { connected: true, user: { is_admin: true }, callWS: () => { requests++; } };
+  for (const patch of [{ connected: false }, { user: { is_admin: false } }, { callWS: null }]) {
+    await assert.rejects(setRoomDeviceLink({ ...hass, ...patch }, 'a', 'device:x', true));
+    await assert.rejects(assignDeviceRoom({ ...hass, ...patch }, 'device:x', 'a', null));
+  }
+  for (const linked of [undefined, null, 'true', 1]) await assert.rejects(setRoomDeviceLink(hass, 'a', 'device:x', linked), TypeError);
+  for (const expected of [undefined, '', ' a', UNASSIGNED_ROOM_ID]) await assert.rejects(assignDeviceRoom(hass, 'device:x', 'a', expected), TypeError);
+  await assert.rejects(setRoomDeviceLink(hass, 'a', 'light.x', true), TypeError);
+  await assert.rejects(assignDeviceRoom(hass, 'device:x', UNASSIGNED_ROOM_ID, null), TypeError);
+  assert.equal(requests, 0);
 });
 
 test('panel settings reads are authenticated-user accessible, copied and validated without fallback defaults', async () => {

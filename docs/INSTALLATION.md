@@ -1,6 +1,6 @@
 # Easy-Hass installieren
 
-**Version 0.2.0-alpha.3 · Stand 25. Oktober 2026**
+**Version 0.2.0-alpha.4 · Stand 26. Oktober 2026**
 
 **Alpha / Vorabversion:** Diese Ausgabe ist für frühe Tests gedacht und kann
 Fehler oder noch unvollständiges Verhalten enthalten. Vor der Installation
@@ -33,7 +33,7 @@ in den HACS-Standardkatalog wird damit nicht vorausgesetzt.
    **Herunterladen** wählen. Bei einem bereits geladenen Repository über das
    Drei-Punkte-Menü **Erneut herunterladen / Redownload** öffnen.
 5. Im Download-Dialog **Andere Version benötigt? / Need a different version?**
-   öffnen und die Vorabversion **v0.2.0-alpha.3** auswählen. Die Auswahl setzt
+   öffnen und die Vorabversion **v0.2.0-alpha.4** auswählen. Die Auswahl setzt
    voraus, dass dieser GitHub-Prerelease veröffentlicht wurde.
 6. Mit dem Neustart und der Aktivierung in den folgenden Abschnitten fortfahren.
 
@@ -59,7 +59,7 @@ benötigt. Eine npm-Installation ist für diesen Schritt nicht erforderlich.
 npm run package
 ```
 
-Das erzeugt `dist/easy-hass-0.2.0-alpha.3.zip`. Dieses ZIP direkt im
+Das erzeugt `dist/easy-hass-0.2.0-alpha.4.zip`. Dieses ZIP direkt im
 HA-Konfigurationsverzeichnis entpacken. Alternativ den vollständigen Ordner
 `custom_components/easy_hass/` dorthin kopieren. Die Struktur muss so aussehen:
 
@@ -130,6 +130,13 @@ Escape bricht ab.
 Räume und ihre Fotos lassen sich weiterhin in der normalen HA-Raumverwaltung bearbeiten.
 Geräte unter **Einstellungen → Geräte & Dienste** dem passenden Raum zuordnen.
 Eine explizite Raumzuordnung der Entity hat Vorrang vor der des Geräts.
+
+In Easy-Hass unter **Mehr → Einstellungen → Räume → Raum → Geräte → Gerät hinzufügen**
+werden Geräte ohne Raum direkt zugewiesen. Gehört ein Gerät bereits zu einem Raum,
+wählst du **Verschieben** oder **Zusätzlich anzeigen**. Die zusätzliche Anzeige gilt
+nur für EasyHASS und lässt den ursprünglichen HA-Raum bestehen. Sie lässt sich am
+linken Griff sortieren und rechts wieder entfernen, ohne die ursprüngliche
+Zuordnung zu ändern.
 
 Neue und umbenannte Räume sowie geänderte Zuordnungen erscheinen automatisch
 in Easy-Hass. Leere Räume bleiben sichtbar. Geräte ohne Raum stehen unter

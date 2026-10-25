@@ -2,7 +2,7 @@
 
 Eine reduzierte, raumorientierte Oberfläche für Home Assistant.
 
-**Aktuelle Vorabversion: `0.2.0-alpha.3` · Noch keine stabile Veröffentlichung.**
+**Aktuelle Vorabversion: `0.2.0-alpha.4` · Noch keine stabile Veröffentlichung.**
 Die Alpha wurde mit Home Assistant 2026.10.2 in einer getrennten Testinstallation
 geprüft. Andere HA-Versionen, physische Geräte und native Companion-Apps sind
 noch nicht vollständig abgedeckt.
@@ -16,7 +16,7 @@ die vorhandene Home-Assistant-Anmeldung und die bestehenden Berechtigungen.
 - Räume mit Foto, Temperatur, Luftfeuchtigkeit und kompakten Licht-/Rollladenreglern.
 - Raumkarten vergrößern sich zur Detailansicht; horizontal wischen wechselt den Raum.
 - Raumverwaltung mit Fotoauswahl, Ausblenden und Drag & Drop für die Raumreihenfolge.
-- Geräte pro Raum zuweisen und sortieren; Gerätegruppen ohne doppelte Darstellung ihrer Mitglieder.
+- Geräte pro Raum zuweisen, zusätzlich anzeigen und sortieren; Gerätegruppen ohne doppelte Darstellung ihrer Mitglieder.
 - Licht und Rollläden direkt durch seitliches Ziehen einstellen; in der Übersicht auch durch langes Halten.
 - In Raumdetails öffnet ein Tipp auf den Lichtbalken die Gerätedetails, das Glühbirnen-Icon schaltet.
 - Wetterdetailansicht mit stündlicher und täglicher Vorhersage aus Home Assistant.
@@ -34,7 +34,7 @@ Es werden keine Beispielräume oder Geräte auf dem Server angelegt.
 1. In HACS unter **⋮ → Benutzerdefinierte Repositories**
    `https://github.com/prograp/easyHASS` mit Typ **Integration** hinzufügen.
 2. **Easy-Hass** öffnen und herunterladen. Im Versionsdialog die Vorabversion
-   **`v0.2.0-alpha.3`** wählen; bei Bedarf „Need a different version?“ öffnen.
+   **`v0.2.0-alpha.4`** wählen; bei Bedarf „Need a different version?“ öffnen.
 3. Home Assistant neu starten.
 4. **Einstellungen → Geräte & Dienste → Integration hinzufügen → Easy-Hass**.
 5. Den zusätzlichen Menüpunkt öffnen. Für die erste Prüfung mit sichtbarem
@@ -48,7 +48,7 @@ als Bestandteil des offiziellen Standardkatalogs angeboten.
 
 ## Manuell installieren
 
-Das ZIP `easy-hass-0.2.0-alpha.3.zip` aus den
+Das ZIP `easy-hass-0.2.0-alpha.4.zip` aus den
 [GitHub-Releases](https://github.com/prograp/easyHASS/releases) im
 HA-Konfigurationsverzeichnis entpacken. Es enthält
 `custom_components/easy_hass/`. Anschließend neu starten und die Integration

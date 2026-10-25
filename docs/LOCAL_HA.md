@@ -157,6 +157,14 @@ Reihenfolge in der Raumansicht und die Trennung von Sensorgeräten und
 Sensorzeilen. Geräteaktionen werden im Test abgefangen. Bericht:
 `test-results/browser-room-devices.json`.
 
+`npm run test:room-device-links` prüft direkte Zuweisung, die Auswahl bei bestehenden
+Zuordnungen, zusätzliche Anzeigen in mehreren Räumen, Sortierung, Neuladen und das
+gezielte Entfernen eines Verweises. Abbrechen, Speicherfehler sowie Offline- und
+Admin-Sperren werden ebenfalls geprüft. Der Test erstellt eigene temporäre Räume,
+blockiert Geräteaktionen und stellt alle veränderten lokalen Fixture-Zuordnungen
+und EasyHASS-Einstellungen wieder her. Nicht gleichzeitig mit anderen Tests ausführen,
+die diese Fixtures verschieben. Bericht: `test-results/browser-room-device-links.json`.
+
 `npm run test:room-visibility` prüft das Ausblenden und Wiedereinblenden eines
 eigenen Testraums, Abbrechen, Persistenz nach Neuladen, direkte Raumlinks,
 Raumwechsel, Synchronisierung zwischen zwei Clients und fehlgeschlagenes

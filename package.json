@@ -1,6 +1,6 @@
 {
   "name": "easy-hass",
-  "version": "0.2.0-alpha.3",
+  "version": "0.2.0-alpha.4",
   "private": true,
   "license": "GPL-3.0-only",
   "type": "module",
@@ -27,7 +27,8 @@
     "test:room-motion": "node scripts/browser-room-motion.mjs",
     "test:image-palette": "node scripts/browser-image-palette.mjs",
     "test:cache": "node scripts/browser-cache.mjs",
-    "test:weather": "node scripts/browser-weather.mjs"
+    "test:weather": "node scripts/browser-weather.mjs",
+    "test:room-device-links": "node scripts/browser-room-device-links.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1"

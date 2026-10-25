@@ -59,19 +59,37 @@ Einstellungen bleiben sie mit „Ausgeblendet“ erreichbar; die Roboterliste un
 die vollständige Gruppenzuordnung bleiben unverändert.
 
 `easy_hass/settings/get` und `easy_hass/settings/subscribe` liefern authentifizierten
-Clients `{hidden_area_ids, room_device_order}`. `easy_hass/room_visibility/set` ändert als Administrator
+Clients `{hidden_area_ids, room_device_order, room_device_links}`. `easy_hass/room_visibility/set` ändert als Administrator
 genau eine echte Area über `{area_id, hidden}` und verteilt den neuen Stand an
 alle Clients. Die Änderung wird erst mit **Speichern** übernommen. Vor dem ersten
 Einstellungs-Snapshot zeigt das Panel keine Raumkarten, damit ausgeblendete Räume
 nicht kurz aufblitzen. Direkte Links auf ausgeblendete Räume führen zur Übersicht.
 
 Unter **Räume → Raum → Geräte** lassen sich registrierte Geräte hinzufügen,
-aus der Raumzuordnung entfernen und am linken Griff sortieren. Die Auswahl zeigt
-den bisherigen Raum; Zuordnungen werden direkt über die native Geräte-Registry
-gespeichert. Eigenständige steuerbare Entitäten und Gruppen ohne Gerät verwenden
-die Entity-Registry. Explizite Raumzuordnungen einzelner Entitäten bleiben beim
-Verschieben ihres Geräts erhalten. Physische Sensorgeräte können zugeordnet werden,
-ihre einzelnen Sensorentitäten erzeugen weiterhin keine Zeilen in der Raumansicht.
+aus der Raumzuordnung entfernen und am linken Griff sortieren. Geräte ohne native
+Raumzuordnung werden direkt zugewiesen. Bereits zugeordnete Geräte öffnen eine
+Auswahl zwischen **Verschieben** und **Zusätzlich anzeigen**. Verschieben ändert
+die native Geräte-Registry; eigenständige steuerbare Entitäten und Gruppen ohne
+Gerät verwenden die Entity-Registry. Explizite Raumzuordnungen einzelner Entitäten
+bleiben beim Verschieben ihres Geräts erhalten. Physische Sensorgeräte können
+zugeordnet werden, ihre einzelnen Sensorentitäten erzeugen weiterhin keine Zeilen
+in der Raumansicht.
+
+`easy_hass/room_device_assignment/set` prüft als Administrator die erwartete
+bisherige Zuordnung (`expected_area_id`, auch `null`) und setzt atomar die neue
+`area_id` für `key`. Ein zwischenzeitliches Verschieben durch einen anderen Client
+wird als Konflikt gemeldet. Redundante zusätzliche Verweise im bisherigen und im
+neuen nativen Raum werden entfernt; Verweise in weiteren Räumen bleiben bestehen.
+
+**Zusätzlich anzeigen** speichert ausschließlich einen EasyHASS-Verweis in
+`entry.options.room_device_links` (Area-ID → Liste von Geräteschlüsseln). Der Befehl
+`easy_hass/room_device_link/set` ändert als Administrator mit `{area_id, key, linked}`
+genau einen Verweis. Entfernen einer zusätzlichen Anzeige löscht nur diesen Verweis.
+Die native Zuordnung und andere Räume bleiben erhalten. Referenzen nutzen dieselben
+Entity-IDs und Zustände wie die native Anzeige; sie lassen sich pro Raum sortieren.
+Explizit hinzugefügte Gruppen ersetzen weiterhin ihre Mitglieder. Ein zusätzlich
+angezeigtes Einzelgerät zieht jedoch keine fremde Gruppe samt weiteren Geräten
+in den Raum. Die globale Zahl eingeschalteter Lampen zählt identische Entities nur einmal.
 
 `easy_hass/room_device_order/set` speichert als Administrator `{area_id, keys}`
 in `entry.options.room_device_order`. Schlüssel sind `device:<id>` bzw.
