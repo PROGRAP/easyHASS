@@ -1,0 +1,11 @@
+Easy-Hass - A room-oriented interface for Home Assistant.
+Copyright (C) 2026 PROGRAP GmbH
+
+Easy-Hass is licensed under version 3 only of the GNU General Public License
+(SPDX-License-Identifier: GPL-3.0-only).
+
+Bundled third-party assets retain their own licenses: Heroicons (MIT) and
+Inter (SIL Open Font License 1.1). See the license files accompanying those assets.
+
+Source code and build instructions: https://github.com/PROGRAP/easyHASS
+For a released version, use its matching release tag.
