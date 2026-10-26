@@ -172,8 +172,8 @@ function sortAssignments(items, order) {
 }
 
 /** Native devices (including sensor devices) plus independently assigned controls.
- * A group inferred from its members is sortable, but removing its own null/foreign
- * area would not remove those memberships; canRemove makes that distinction clear.
+ * A device shown through an entity's explicit area override is sortable, but
+ * clearing its foreign native area would not remove that independent override.
  */
 export function listRoomAssignments(registries, states = {}, areaId, order = [], settings = {}) {
   if (!listRegisteredAreas(registries).some(area => area.id === areaId)) return [];
@@ -625,7 +625,7 @@ export function deriveRooms(registries, states = {}, settings = {}) {
     return makeRoom(area, entities.filter(entity => entity.areaId === areaId || linked(entity)), entities);
   });
   const unassigned = entities.filter((entity) => !areaIds.has(entity.areaId) && !entity.category && (
-    ['light', 'cover', 'climate', 'fan', 'switch', 'vacuum'].includes(entity.domain)
+    ['light', 'cover', 'climate', 'fan', 'switch', 'vacuum', 'group'].includes(entity.domain)
     || (entity.domain === 'sensor' && ['temperature', 'humidity'].includes(entity.deviceClass))
   ));
   if (unassigned.length) rooms.push(makeRoom({ area_id: UNASSIGNED_ROOM_ID, name: 'Ohne Raum' }, unassigned, entities, true));
@@ -665,31 +665,22 @@ export function deriveHome(registries, states = {}, settings = {}) {
 }
 
 /**
- * Room-detail rows preserve real HA group boundaries, including shared groups.
+ * Only a group actually displayed in this room can replace its local members.
+ * Its real HA boundaries remain intact, including members in other rooms.
  * Unlike the home summary, an unavailable group still represents its members.
- * allEntities supplies visible candidate rows. Optional entityScopes contains
+ * allEntities supplies visible entities for topology. Optional entityScopes contains
  * topology only, including hidden members; it never supplies rows/suppressors.
  */
 export function deriveRoomDevices(room, allEntities = room.entities, entityScopes, order = []) {
   const relevant = (entity) => entity?.id && !entity.category && !entity.hidden_by && !entity.disabled_by
     && !DETAIL_EXCLUDED_DOMAINS.has(entity.domain);
   const locals = (room.entities || []).filter(relevant);
-  const localIds = new Set(locals.map((entity) => entity.id));
   const all = new Map([...entries(allEntities), ...locals].filter(relevant).map((entity) => [entity.id, entity]));
   const memberIds = (entity) => Array.isArray(entity.attributes?.entity_id)
     ? [...new Set(entity.attributes.entity_id.filter((id) => typeof id === 'string' && id))] : [];
   const isGroup = (entity) => entity.domain === 'group' || memberIds(entity).length > 0;
   const scopes = new Map([...all.values()].map((entity) => [entity.id, { id: entity.id, areaId: entity.areaId, memberIds: memberIds(entity) }]));
   for (const scope of entries(entityScopes)) scopes.set(scope.id, scope);
-  // Additional single-device links grant only their explicit entity scope.
-  // Inferring a foreign parent group from those members would silently widen
-  // its controls to unlinked devices. Explicitly linked groups remain locals.
-  // The synthetic room also contains orphaned non-null area IDs; its actual
-  // local members still supply native group scope, and it cannot have links.
-  const scopeLocalIds = new Set(room.unassigned ? localIds : []);
-  for (const scope of scopes.values()) {
-    if (scope.areaId === room.id || (room.unassigned && !scope.areaId)) scopeLocalIds.add(scope.id);
-  }
   const descendants = (entity) => {
     const ids = new Set();
     const visit = (current) => {
@@ -719,9 +710,9 @@ export function deriveRoomDevices(room, allEntities = room.entities, entityScope
     visit(scopes.get(entity.id));
     return leaves.size;
   };
-  const groups = [...all.values()].filter(isGroup).map((entity) => ({ entity, descendants: descendants(entity) }))
-    .filter(({ entity, descendants: ids }) => localIds.has(entity.id) || entity.areaId === room.id
-      || [...ids].some((id) => scopeLocalIds.has(id)))
+  // Global topology is only for traversing a chosen local group's members.
+  // A parent assigned elsewhere or unassigned must never hide local controls.
+  const groups = locals.filter(isGroup).map((entity) => ({ entity, descendants: descendants(entity) }))
     .sort((a, b) => b.descendants.size - a.descendants.size || a.entity.id.localeCompare(b.entity.id));
   const suppressed = new Set();
   const selectedGroups = [];

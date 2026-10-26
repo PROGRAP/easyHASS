@@ -165,6 +165,16 @@ blockiert Geräteaktionen und stellt alle veränderten lokalen Fixture-Zuordnung
 und EasyHASS-Einstellungen wieder her. Nicht gleichzeitig mit anderen Tests ausführen,
 die diese Fixtures verschieben. Bericht: `test-results/browser-room-device-links.json`.
 
+`npm run test:room-group-scope` prüft einen echten, eigenen HA-Gruppenhelper in
+zwei temporären Räumen. Mitglieder bleiben sichtbar, solange ihre Gruppe in
+einem anderen Raum oder unter „Ohne Raum“ liegt. Eine ausdrücklich zusätzlich
+angezeigte oder nativ in den Raum verschobene Gruppe ersetzt ihre Mitglieder;
+nach Entfernen beziehungsweise Zurückverschieben erscheinen diese wieder.
+Der Test prüft Übersicht, Raumdetails, Einstellungen und Neuladen, blockiert
+Gerätebefehle und stellt die ursprünglichen Fixture-Zuordnungen und Einstellungen
+wieder her. Nicht parallel zu anderen Fixture-Tests ausführen. Bericht:
+`test-results/browser-room-group-scope.json`.
+
 `npm run test:room-visibility` prüft das Ausblenden und Wiedereinblenden eines
 eigenen Testraums, Abbrechen, Persistenz nach Neuladen, direkte Raumlinks,
 Raumwechsel, Synchronisierung zwischen zwei Clients und fehlgeschlagenes

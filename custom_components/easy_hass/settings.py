@@ -158,26 +158,13 @@ def _relevant_entity(entry: Any) -> bool:
 
 
 def _entity_in_area(
-    hass: HomeAssistant, entity_id: str, area_id: str,
+    entity_id: str, area_id: str,
     entities: entity_registry.EntityRegistry, devices: device_registry.DeviceRegistry,
 ) -> bool:
-    """Follow real group topology, including hidden members, with cycle protection."""
-    visited: set[str] = set()
-    pending = [entity_id]
-    while pending:
-        current = pending.pop()
-        if current in visited:
-            continue
-        visited.add(current)
-        entry = entities.async_get(current)
-        device = devices.async_get(entry.device_id) if entry and entry.device_id else None
-        if entry and (entry.area_id or (device.area_id if device else None)) == area_id:
-            return True
-        state = hass.states.get(current)
-        members = state.attributes.get("entity_id") if state else None
-        if isinstance(members, (list, tuple)):
-            pending.extend(member for member in members if isinstance(member, str))
-    return False
+    """Use the entity's native effective area, never its group members' areas."""
+    entry = entities.async_get(entity_id)
+    device = devices.async_get(entry.device_id) if entry and entry.device_id else None
+    return bool(entry and (entry.area_id or (device.area_id if device else None)) == area_id)
 
 
 def _assignment_entry(hass: HomeAssistant, key: str) -> Any:
@@ -207,11 +194,11 @@ def _assignment_in_area(hass: HomeAssistant, key: str, area_id: str, linked_keys
         # A visible function can explicitly belong to another room. Its device
         # stays sortable there without changing that function's native override.
         return any(_relevant_entity(entry) and _entity_in_area(
-            hass, entry.entity_id, area_id, entities, devices
+            entry.entity_id, area_id, entities, devices
         ) for entry in entity_registry.async_entries_for_device(entities, item_id))
     entry = entities.async_get(item_id)
     return bool(_relevant_entity(entry) and not entry.device_id
-                and _entity_in_area(hass, item_id, area_id, entities, devices))
+                and _entity_in_area(item_id, area_id, entities, devices))
 
 
 @websocket_api.websocket_command({

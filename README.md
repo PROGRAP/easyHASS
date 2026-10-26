@@ -2,7 +2,7 @@
 
 Eine reduzierte, raumorientierte Oberfläche für Home Assistant.
 
-**Aktuelle Vorabversion: `0.2.0-alpha.5` · Noch keine stabile Veröffentlichung.**
+**Aktuelle Vorabversion: `0.2.0-alpha.6` · Noch keine stabile Veröffentlichung.**
 Die Alpha wurde mit Home Assistant 2026.10.2 in einer getrennten Testinstallation
 geprüft. Andere HA-Versionen, physische Geräte und native Companion-Apps sind
 noch nicht vollständig abgedeckt.
@@ -34,7 +34,7 @@ Es werden keine Beispielräume oder Geräte auf dem Server angelegt.
 1. In HACS unter **⋮ → Benutzerdefinierte Repositories**
    `https://github.com/prograp/easyHASS` mit Typ **Integration** hinzufügen.
 2. **Easy-Hass** öffnen und herunterladen. Im Versionsdialog die Vorabversion
-   **`v0.2.0-alpha.5`** wählen; bei Bedarf „Need a different version?“ öffnen.
+   **`v0.2.0-alpha.6`** wählen; bei Bedarf „Need a different version?“ öffnen.
 3. Home Assistant neu starten.
 4. **Einstellungen → Geräte & Dienste → Integration hinzufügen → Easy-Hass**.
 5. Den zusätzlichen Menüpunkt öffnen. Für die erste Prüfung mit sichtbarem
@@ -48,7 +48,7 @@ als Bestandteil des offiziellen Standardkatalogs angeboten.
 
 ## Manuell installieren
 
-Das ZIP `easy-hass-0.2.0-alpha.5.zip` aus den
+Das ZIP `easy-hass-0.2.0-alpha.6.zip` aus den
 [GitHub-Releases](https://github.com/prograp/easyHASS/releases) im
 HA-Konfigurationsverzeichnis entpacken. Es enthält
 `custom_components/easy_hass/`. Anschließend neu starten und die Integration

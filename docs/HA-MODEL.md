@@ -26,6 +26,16 @@ Die Zuordnung erfolgt über die direkte Entity-Area, danach die Device-Area. Ver
 Die Geräteliste der Raumansicht enthält keine `sensor`- oder `binary_sensor`-Einträge.
 Temperatur und Luftfeuchtigkeit werden weiterhin aus den Sensoren ermittelt und im Raumheader angezeigt.
 
+Eine Gerätegruppe ersetzt ihre Mitglieder in der Raumdetailansicht nur, wenn
+die Gruppe selbst diesem Raum zugeordnet oder dort ausdrücklich zusätzlich
+angezeigt wird. Gruppen in anderen Räumen werden nicht aus ihren Mitgliedern
+abgeleitet: Die lokalen Einzelgeräte bleiben sichtbar und einzeln bedienbar.
+Das gilt auch für Gruppen ohne Raumzuordnung. Diese sind unter **Ohne Raum**
+erreichbar, einschließlich generischer `group.*`-Entitäten. Versteckte oder
+deaktivierte Gruppen verdrängen keine sichtbaren Geräte. Bei einer tatsächlich
+angezeigten Gruppe bleibt die vollständige, gegebenenfalls verschachtelte
+Mitgliedschaft erhalten; ein Gruppenbefehl verwendet ihre echte Entity-ID.
+
 ## Raumverwaltung
 
 Die Raumverwaltung unter **Mehr → Einstellungen → Räume** verwendet
@@ -87,9 +97,11 @@ neuen nativen Raum werden entfernt; Verweise in weiteren Räumen bleiben bestehe
 genau einen Verweis. Entfernen einer zusätzlichen Anzeige löscht nur diesen Verweis.
 Die native Zuordnung und andere Räume bleiben erhalten. Referenzen nutzen dieselben
 Entity-IDs und Zustände wie die native Anzeige; sie lassen sich pro Raum sortieren.
-Explizit hinzugefügte Gruppen ersetzen weiterhin ihre Mitglieder. Ein zusätzlich
-angezeigtes Einzelgerät zieht jedoch keine fremde Gruppe samt weiteren Geräten
-in den Raum. Die globale Zahl eingeschalteter Lampen zählt identische Entities nur einmal.
+Explizit hinzugefügte Gruppen ersetzen ihre im Zielraum sichtbaren Mitglieder.
+Wird diese zusätzliche Anzeige entfernt oder die native Gruppe in einen anderen
+Raum verschoben, erscheinen die lokalen Mitglieder wieder einzeln. Ein Einzelgerät
+zieht keine fremde Gruppe samt weiteren Geräten in den Raum. Die globale Zahl
+eingeschalteter Lampen zählt identische Entities nur einmal.
 
 `easy_hass/room_device_order/set` speichert als Administrator `{area_id, keys}`
 in `entry.options.room_device_order`. Schlüssel sind `device:<id>` bzw.
@@ -99,9 +111,9 @@ Die Raumansicht behält auch mit individueller Sortierung ihre Abschnitte wie
 **Licht** und **Beschattung**. Innerhalb jedes Abschnitts gilt die gespeicherte
 Gerätereihenfolge. Die Abschnitte folgen dem jeweils ersten Gerät in dieser
 Reihenfolge; ohne individuelle Sortierung gilt die übliche Reihenfolge der
-Gerätetypen. Gerätegruppen ersetzen weiterhin ihre Mitglieder, auch unter
-„Ohne Raum“ bei verwaisten Raumzuordnungen. Neue Geräte erscheinen innerhalb
-ihres Abschnitts hinter den bereits sortierten Geräten.
+Gerätetypen. Auch unter „Ohne Raum“ verdrängen ausschließlich dort angezeigte
+Gruppen ihre Mitglieder. Neue Geräte erscheinen innerhalb ihres Abschnitts
+hinter den bereits sortierten Geräten.
 
 ## Geräteaktionen
 

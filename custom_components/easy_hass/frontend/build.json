@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "revision": "6dd576417a39ceb434689114217330f3591b1523d11e25b278495a7fad51ea3e",
-  "entry": "builds/6dd576417a39ceb434689114217330f3591b1523d11e25b278495a7fad51ea3e/easy-hass.js",
+  "revision": "6fbc0a224fd0b5377216dce5be9d707fe6ac640f424c25edac467028f151363d",
+  "entry": "builds/6fbc0a224fd0b5377216dce5be9d707fe6ac640f424c25edac467028f151363d/easy-hass.js",
   "files": [
     "area-sorter.js",
     "assets/fonts/InterVariable.woff2",

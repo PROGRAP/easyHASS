@@ -266,26 +266,62 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_found")
         self.assertEqual(dict(self.entry.options), before)
 
-    async def test_order_supports_entity_overrides_and_recursive_hidden_group_members_without_mutating_them(self):
+    async def test_order_preserves_native_devices_and_visible_entity_area_overrides(self):
         device = self.device("Overridden", self.first.id)
         member = self.entity("light", "member", device=device, area_id=self.second.id)
-        hidden = self.entity("group", "nested", hidden=True)
-        outer = self.entity("group", "outer")
-        self.hass.states.async_set(hidden.entity_id, "on", {"entity_id": [member.entity_id, outer.entity_id]})
-        self.hass.states.async_set(outer.entity_id, "unavailable", {"entity_id": [hidden.entity_id]})
-        keys = [f"entity:{outer.entity_id}", f"device:{device.id}"]
-        await self.set_order(self.second.id, keys)
-        self.assertTrue(self.admin_messages[-1]["success"])
-        self.assertEqual(self.entry.options["room_device_order"], {self.second.id: keys})
+        keys = [f"device:{device.id}"]
+        for area in (self.first, self.second):
+            await self.set_order(area.id, keys)
+            self.assertTrue(self.admin_messages[-1]["success"])
+        self.assertEqual(self.entry.options["room_device_order"], {
+            self.first.id: keys, self.second.id: keys,
+        })
         self.assertIs(self.devices.async_get(device.id), device)
         self.assertIs(self.entities.async_get(member.entity_id), member)
-        self.assertIsNone(self.entities.async_get(outer.entity_id).area_id)
-        self.entities.async_update_entity(member.entity_id, hidden_by=entity_registry.RegistryEntryHider.USER)
+        for changes in (
+            {"hidden_by": entity_registry.RegistryEntryHider.USER},
+            {"hidden_by": None, "disabled_by": entity_registry.RegistryEntryDisabler.USER},
+        ):
+            self.entities.async_update_entity(member.entity_id, **changes)
+            before = dict(self.entry.options)
+            await self.set_order(self.second.id, keys)
+            self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_found")
+            self.assertEqual(dict(self.entry.options), before)
+            await self.set_order(self.first.id, keys)
+            self.assertTrue(self.admin_messages[-1]["success"], "native device scope is retained")
+
+    async def test_order_requires_native_or_explicit_group_scope_not_member_ancestry(self):
+        device = self.device("Native member device", self.first.id)
+        member = self.entity("light", "native_member", device=device)
+        hidden = self.entity("group", "nested", hidden=True)
+        outer = self.entity("group", "outer", area_id=self.second.id)
+        unassigned = self.entity("light", "unassigned_group")
+        self.hass.states.async_set(hidden.entity_id, "on", {"entity_id": [member.entity_id, outer.entity_id]})
+        self.hass.states.async_set(outer.entity_id, "unavailable", {"entity_id": [hidden.entity_id]})
+        self.hass.states.async_set(unassigned.entity_id, "on", {"entity_id": [member.entity_id]})
+        await self.set_order(self.first.id, [f"device:{device.id}"])
+        self.assertTrue(self.admin_messages[-1]["success"])
+        before = dict(self.entry.options)
+        for group in (outer, unassigned):
+            await self.set_order(self.first.id, [f"entity:{group.entity_id}"])
+            self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_found")
+            self.assertEqual(dict(self.entry.options), before)
         await self.set_order(self.second.id, [f"entity:{outer.entity_id}"])
-        self.assertTrue(self.admin_messages[-1]["success"], "hidden member still supplies group scope")
+        self.assertTrue(self.admin_messages[-1]["success"], "the group's native area remains valid")
+        await self.set_link(self.first.id, f"entity:{outer.entity_id}", True)
+        keys = [f"entity:{outer.entity_id}", f"device:{device.id}"]
+        await self.set_order(self.first.id, keys)
+        self.assertTrue(self.admin_messages[-1]["success"])
+        self.assertEqual(self.entry.options["room_device_order"][self.first.id], keys)
+        self.assertIs(self.devices.async_get(device.id), device)
+        self.assertIs(self.entities.async_get(member.entity_id), member)
+        self.assertIs(self.entities.async_get(outer.entity_id), outer)
+        self.entities.async_update_entity(member.entity_id, hidden_by=entity_registry.RegistryEntryHider.USER)
+        await self.set_order(self.first.id, keys)
+        self.assertTrue(self.admin_messages[-1]["success"], "the explicit link does not depend on member visibility")
         self.entities.async_update_entity(outer.entity_id, hidden_by=entity_registry.RegistryEntryHider.USER)
         before = dict(self.entry.options)
-        await self.set_order(self.second.id, [f"entity:{outer.entity_id}"])
+        await self.set_order(self.first.id, keys)
         self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_found")
         self.assertEqual(dict(self.entry.options), before)
 
@@ -409,13 +445,13 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
         await self.set_order(self.second.id, [f"entity:{group.entity_id}"])
         self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_found")
         self.assertEqual(self.entry.options["room_device_order"], {self.second.id: [f"device:{device.id}"]})
-        # The same check applies to visible members; only explicit group links
-        # or the existing native member inference may authorize the whole group.
+        # Neither visible nor native members grant their group room scope.
+        # Only the group's own native assignment or an explicit link does.
         self.entities.async_update_entity(member.entity_id, hidden_by=None)
         await self.set_order(self.second.id, [f"entity:{group.entity_id}"])
         self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_found")
         await self.set_order(self.first.id, [f"entity:{group.entity_id}"])
-        self.assertTrue(self.admin_messages[-1]["success"])
+        self.assertEqual(self.admin_messages[-1]["error"]["code"], "not_found")
         await self.set_link(self.second.id, f"entity:{group.entity_id}", True)
         await self.set_order(self.second.id, [f"entity:{group.entity_id}"])
         self.assertTrue(self.admin_messages[-1]["success"])
@@ -423,6 +459,8 @@ class SettingsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.admin_messages[-1]["success"])
         self.assertEqual(self.entities.async_get(group.entity_id).area_id, self.second.id)
         self.assertEqual(self.entry.options["room_device_links"], {self.second.id: [f"device:{device.id}"]})
+        await self.set_order(self.second.id, [f"entity:{group.entity_id}"])
+        self.assertTrue(self.admin_messages[-1]["success"], "native group assignment replaces the explicit link")
         self.assertEqual(self.entities.async_get(member.entity_id).device_id, member.device_id)
         self.assertEqual(self.entities.async_get(member.entity_id).area_id, member.area_id)
 

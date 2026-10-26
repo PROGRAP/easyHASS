@@ -58,7 +58,7 @@ test('assignment lists include physical sensor devices, preserve native scope an
   assert.equal(inherited[0].canRemove, false);
 });
 
-test('unassigned shared groups remain real sortable assignments with hidden nested member scope', () => {
+test('unassigned groups stay out of member rooms until explicitly linked', () => {
   const regs = assignmentFixture();
   regs.entities.push({ entity_id: 'group.outer', name: 'Outer' },
     { entity_id: 'group.hidden', hidden_by: 'integration' },
@@ -68,12 +68,14 @@ test('unassigned shared groups remain real sortable assignments with hidden nest
     'group.hidden': state('group.hidden', 'on', { entity_id: ['light.member', 'group.outer'] }),
   };
   for (const areaId of ['a', 'b']) {
-    const group = listRoomAssignments(regs, states, areaId).find(item => item.key === 'entity:group.outer');
+    assert.ok(!listRoomAssignments(regs, states, areaId).some(item => item.key === 'entity:group.outer'));
+    const settings = { room_device_links: { [areaId]: ['entity:group.outer'] } };
+    const group = listRoomAssignments(regs, states, areaId, [], settings).find(item => item.key === 'entity:group.outer');
     assert.equal(group.isGroup, true);
-    assert.equal(group.inherited, true);
-    assert.equal(group.inheritedReason, 'group');
+    assert.equal(group.isAdditional, true);
+    assert.equal(group.inherited, false);
     assert.equal(group.areaId, null);
-    assert.equal(group.canRemove, false);
+    assert.equal(group.canRemove, true);
   }
   assert.ok(listAssignableDevices(regs, states, 'a').some(item => item.key === 'entity:group.outer'));
   assert.ok(!listAssignableDevices(regs, states, 'a').some(item => item.key === 'entity:group.hidden'));
@@ -244,7 +246,7 @@ test('an additional single member never widens into its foreign group or unlinke
   await setRoomBrightness(hass, room, 70);
   await setRoomBrightness(hass, entityControlTarget(detail[0]), 80);
   assert.deepEqual(hass.calls.map(call => call[2].entity_id), [['light.member'], ['light.member']]);
-  assert.deepEqual(deriveRoomDevices(home.rooms[0], home.entities, home.entityScopes).map(entity => entity.id), ['light.group'], 'native inference is retained');
+  assert.deepEqual(deriveRoomDevices(home.rooms[0], home.entities, home.entityScopes).map(entity => entity.id), ['light.group'], 'a same-room group still deduplicates its members');
   settings.room_device_links.b.push('entity:light.group');
   const explicit = deriveHome(regs, states, settings);
   assert.deepEqual(explicit.rooms[1].lights.map(entity => entity.id), ['light.group']);
@@ -447,7 +449,7 @@ test('hidden rooms leave settings, shared-group topology and robots complete whi
   assert.deepEqual(hidden.vacuums, all.vacuums);
   assert.equal(hidden.vacuums[0].areaId, 'b');
   assert.deepEqual(deriveRoomDevices(hidden.rooms[0], hidden.entities, hidden.entityScopes), deriveRoomDevices(all.rooms[0], all.entities, all.entityScopes));
-  assert.equal(deriveRoomDevices(hidden.rooms[0], hidden.entities, hidden.entityScopes)[0].id, 'light.group');
+  assert.equal(deriveRoomDevices(hidden.rooms[0], hidden.entities, hidden.entityScopes)[0].id, 'light.a');
   assert.deepEqual(listRegisteredAreas(regs).map(area => area.id), ['a', 'b', 'empty']);
   assert.deepEqual(deriveHome(regs, states, ['a', 'b', 'empty', UNASSIGNED_ROOM_ID]).rooms.map(room => room.id), [UNASSIGNED_ROOM_ID]);
   assert.deepEqual(deriveHome(regs, states, { hidden_area_ids: [] }), all, 'unhide restores original HA order');
@@ -1149,22 +1151,26 @@ test('hidden, disabled and diagnostic groups never suppress their visible member
   assert.deepEqual(deriveRoomDevices(home.rooms[0], home.entities).map((entity) => entity.id), ['light.member']);
 });
 
-test('unassigned group is discovered from its room members and keeps its actual identity', () => {
-  const regs = registry([{ entity_id: 'light.unassigned' }, assigned('light.member')]);
-  const states = {
-    'light.unassigned': state('light.unassigned', 'on', { entity_id: ['light.member'], friendly_name: 'Meine Gruppe' }),
-    'light.member': state('light.member', 'on'),
-  };
-  const home = deriveHome(regs, states);
-  const rows = deriveRoomDevices(home.rooms[0], home.entities);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].id, 'light.unassigned');
-  assert.equal(rows[0].areaId, null, 'do not fabricate a registry assignment');
-  assert.equal(rows[0].name, 'Meine Gruppe');
-  assert.equal(rows[0].isSharedGroup, false);
+test('unassigned light and generic groups remain accessible only in Ohne Raum, not their members rooms', () => {
+  for (const domain of ['light', 'group']) {
+    const groupId = `${domain}.unassigned`;
+    const regs = registry([{ entity_id: groupId }, assigned('light.member')]);
+    const states = {
+      [groupId]: state(groupId, 'on', { entity_id: ['light.member'], friendly_name: 'Meine Gruppe' }),
+      'light.member': state('light.member', 'on'),
+    };
+    const home = deriveHome(regs, states);
+    assert.deepEqual(deriveRoomDevices(home.rooms[0], home.entities).map(entity => entity.id), ['light.member']);
+    const unassigned = home.rooms.find(room => room.unassigned);
+    const rows = deriveRoomDevices(unassigned, home.entities, home.entityScopes);
+    assert.deepEqual(rows.map(entity => entity.id), [groupId]);
+    assert.equal(rows[0].areaId, null);
+    assert.equal(rows[0].name, 'Meine Gruppe');
+    assert.equal(rows[0].isSharedGroup, true);
+  }
 });
 
-test('orphaned native area IDs retain their HA group in the synthetic unassigned room', () => {
+test('orphaned members are not replaced by a group in another room; orphaned groups remain accessible', () => {
   for (const parentDomain of ['light', 'group']) {
     const parentId = `${parentDomain}.parent`;
     const regs = registry([
@@ -1180,35 +1186,59 @@ test('orphaned native area IDs retain their HA group in the synthetic unassigned
     assert.equal(unassigned.unassigned, true);
     assert.deepEqual(unassigned.entities.map(entity => entity.id), ['light.orphan']);
     const rows = deriveRoomDevices(unassigned, home.entities, home.entityScopes);
-    assert.deepEqual(rows.map(entity => entity.id), [parentId]);
-    assert.equal(rows[0].isGroup, true);
-    assert.equal(rows[0].memberCount, 1);
-    assert.equal(rows[0].isSharedGroup, true);
+    assert.deepEqual(rows.map(entity => entity.id), ['light.orphan']);
+    assert.equal(rows[0].isGroup, false);
     assert.equal(home.entityScopes['light.orphan'].areaId, 'deleted-area', 'native scope remains unchanged');
+    regs.entities[1].area_id = 'deleted-parent-area';
+    const orphaned = deriveHome(regs, states);
+    const orphanedRoom = orphaned.rooms.find(room => room.unassigned);
+    const orphanedRows = deriveRoomDevices(orphanedRoom, orphaned.entities, orphaned.entityScopes);
+    assert.deepEqual(orphanedRows.map(entity => entity.id), [parentId]);
+    assert.equal(orphanedRows[0].memberCount, 1);
   }
 });
 
-test('cross-room groups replace local members and clearly retain their complete shared scope', async () => {
-  const regs = registry([
-    { entity_id: 'light.shared' }, assigned('light.one'), { entity_id: 'light.two', area_id: 'b' },
-  ], [{ area_id: 'a', name: 'Bibliothek' }, { area_id: 'b', name: 'Galerie' }]);
-  const states = {
-    'light.shared': state('light.shared', 'on', { entity_id: ['light.one', 'light.two'], supported_color_modes: ['brightness'], brightness: 128 }),
-    'light.one': state('light.one', 'on'), 'light.two': state('light.two', 'off'),
-  };
-  const home = deriveHome(regs, states);
-  for (const room of home.rooms.slice(0, 2)) {
-    const rows = deriveRoomDevices(room, home.entities);
-    assert.deepEqual(rows.map((entity) => entity.id), ['light.shared']);
-    assert.equal(rows[0].isSharedGroup, true);
-    assert.equal(rows[0].memberCount, 2);
-    const hass = mockHass(states);
-    await setRoomBrightness(hass, entityControlTarget(rows[0]), 63);
-    assert.deepEqual(hass.calls, [['light', 'turn_on', { brightness_pct: 63, entity_id: ['light.shared'] }]], 'target the real group, never an invented room subset');
+test('foreign light and cover groups leave local devices visible; explicit group links and removal change only displayed targets', async () => {
+  for (const domain of ['light', 'cover']) {
+    const groupId = `${domain}.shared`, memberId = `${domain}.one`, otherId = `${domain}.two`;
+    const attributes = domain === 'light' ? { supported_color_modes: ['brightness'], brightness: 128 }
+      : { supported_features: 15, current_position: 50 };
+    const activeState = domain === 'light' ? 'on' : 'open';
+    const regs = registry([
+      { entity_id: groupId, area_id: 'b' }, { entity_id: memberId, device_id: 'member-device' }, { entity_id: otherId, area_id: 'b' },
+    ], [{ area_id: 'a', name: 'A' }, { area_id: 'b', name: 'B' }], [{ id: 'member-device', area_id: 'a', name: 'Member' }]);
+    const states = {
+      [groupId]: state(groupId, activeState, { ...attributes, entity_id: [memberId, otherId] }),
+      [memberId]: state(memberId, activeState, attributes), [otherId]: state(otherId, activeState, attributes),
+    };
+    const derive = settings => {
+      const home = deriveHome(regs, states, settings);
+      return { home, rows: deriveRoomDevices(home.rooms[0], home.entities, home.entityScopes) };
+    };
+    const initial = derive({ hidden_area_ids: ['b'] });
+    assert.deepEqual(initial.rows.map(entity => entity.id), [memberId], 'hiding the group room never hides the local member');
+    assert.deepEqual(listRoomAssignments(regs, states, 'a').map(item => item.key), ['device:member-device']);
+    const hass = mockHass(states), set = domain === 'light' ? setRoomBrightness : setRoomCoverPosition;
+    await set(hass, entityControlTarget(initial.rows[0]), 63);
+    assert.deepEqual(hass.calls[0][2].entity_id, [memberId]);
+    const linked = derive({ room_device_links: { a: [`entity:${groupId}`] } });
+    assert.deepEqual(linked.rows.map(entity => entity.id), [groupId]);
+    assert.equal(linked.rows[0].isSharedGroup, true);
+    assert.equal(linked.rows[0].memberCount, 2);
+    await set(hass, entityControlTarget(linked.rows[0]), 64);
+    assert.deepEqual(hass.calls[1][2].entity_id, [groupId], 'explicit group keeps its real complete HA target');
+    const unlinked = derive({ room_device_links: {} });
+    assert.deepEqual(unlinked.rows.map(entity => entity.id), [memberId]);
+    await set(hass, entityControlTarget(unlinked.rows[0]), 65);
+    assert.deepEqual(hass.calls[2][2].entity_id, [memberId]);
+    regs.entities[0].area_id = 'a';
+    assert.deepEqual(derive().rows.map(entity => entity.id), [groupId], 'native same-room group also deduplicates');
+    regs.entities[0].area_id = null;
+    assert.deepEqual(derive().rows.map(entity => entity.id), [memberId], 'unassigning group restores native member');
   }
 });
 
-test('an explicitly differently assigned group remains a shared row and unrelated groups stay absent', () => {
+test('foreign groups stay absent even when their members belong to this room', () => {
   const regs = registry([
     { entity_id: 'group.shared', area_id: 'b' }, { entity_id: 'group.unrelated', area_id: 'b' }, assigned('light.one'),
     { entity_id: 'light.foreign', area_id: 'b' },
@@ -1220,13 +1250,13 @@ test('an explicitly differently assigned group remains a shared row and unrelate
   };
   const home = deriveHome(regs, states);
   const rows = deriveRoomDevices(home.rooms[0], home.entities);
-  assert.deepEqual(rows.map((entity) => entity.id), ['group.shared']);
-  assert.equal(rows[0].areaId, 'b');
-  assert.equal(rows[0].isSharedGroup, true);
+  assert.deepEqual(rows.map((entity) => entity.id), ['light.one']);
+  assert.equal(rows[0].areaId, 'a');
+  assert.equal(rows[0].isGroup, false);
 });
 
-test('nested unassigned groups and cycles are finite and preserve one deterministic outer representative', () => {
-  const regs = registry([{ entity_id: 'group.a' }, { entity_id: 'group.b' }, { entity_id: 'group.outer' }, assigned('light.member')]);
+test('nested local groups and cycles are finite and preserve one deterministic outer representative', () => {
+  const regs = registry([assigned('group.a'), assigned('group.b'), assigned('group.outer'), assigned('light.member')]);
   const states = {
     'group.a': state('group.a', 'on', { entity_id: ['group.b', 'light.member'] }),
     'group.b': state('group.b', 'on', { entity_id: ['group.a'] }),
@@ -1238,7 +1268,27 @@ test('nested unassigned groups and cycles are finite and preserve one determinis
   assert.deepEqual(rows.map((entity) => entity.id), ['group.outer']);
   assert.equal(rows[0].memberCount, 1);
   const cycleOnly = home.entities.filter((entity) => entity.id !== 'group.outer');
-  assert.deepEqual(deriveRoomDevices(home.rooms[0], cycleOnly).map((entity) => entity.id), ['group.a']);
+  const cycleRoom = { ...home.rooms[0], entities: cycleOnly };
+  assert.deepEqual(deriveRoomDevices(cycleRoom, cycleOnly).map((entity) => entity.id), ['group.a']);
+});
+
+test('a foreign nested parent cannot replace a local child group or hide an unrelated local member', () => {
+  const regs = registry([
+    assigned('light.child'), assigned('light.one'), assigned('light.independent'),
+    { entity_id: 'light.outer', area_id: 'b' }, { entity_id: 'light.two', area_id: 'b' },
+  ], [{ area_id: 'a', name: 'A' }, { area_id: 'b', name: 'B' }]);
+  const states = {
+    'light.outer': state('light.outer', 'on', { entity_id: ['light.child', 'light.two', 'light.independent'] }),
+    'light.child': state('light.child', 'on', { entity_id: ['light.one'] }),
+    'light.one': state('light.one', 'on'), 'light.two': state('light.two', 'on'),
+    'light.independent': state('light.independent', 'on'),
+  };
+  const home = deriveHome(regs, states);
+  const rows = deriveRoomDevices(home.rooms[0], home.entities, home.entityScopes);
+  assert.deepEqual(rows.map(entity => entity.id), ['light.child', 'light.independent']);
+  assert.equal(rows[0].memberCount, 1);
+  assert.equal(rows[0].isSharedGroup, false);
+  assert.deepEqual(listRoomAssignments(regs, states, 'a').filter(item => item.isGroup).map(item => item.key), ['entity:light.child']);
 });
 
 test('empty and self-referential HA groups stay represented without counting themselves as members', () => {
@@ -1300,7 +1350,7 @@ test('entity toggle reads current state and only supports explicit switch/fan/in
 
 test('hidden group members retain topology without becoming visible entities or room rows', () => {
   const regs = registry([
-    { entity_id: 'light.shared' },
+    assigned('light.shared'),
     { entity_id: 'light.a', device_id: 'a-device', hidden_by: 'integration' },
     { entity_id: 'light.b', area_id: 'b', hidden_by: 'integration' },
   ], [{ area_id: 'a', name: 'A' }, { area_id: 'b', name: 'B' }], [{ id: 'a-device', area_id: 'a' }]);
@@ -1313,13 +1363,12 @@ test('hidden group members retain topology without becoming visible entities or 
   assert.equal(home.entityScopes['light.a'].areaId, 'a');
   assert.ok(Object.isFrozen(home.entityScopes));
   assert.ok(Object.isFrozen(home.entityScopes['light.shared'].memberIds));
-  for (const room of home.rooms.slice(0, 2)) {
-    assert.deepEqual(room.entities, []);
-    const rows = deriveRoomDevices(room, home.entities, home.entityScopes);
-    assert.deepEqual(rows.map((entity) => entity.id), ['light.shared']);
-    assert.equal(rows[0].isSharedGroup, true);
-    assert.equal(rows[0].memberCount, 2);
-  }
+  const rows = deriveRoomDevices(home.rooms[0], home.entities, home.entityScopes);
+  assert.deepEqual(rows.map((entity) => entity.id), ['light.shared']);
+  assert.equal(rows[0].isSharedGroup, true);
+  assert.equal(rows[0].memberCount, 2);
+  assert.deepEqual(home.rooms[1].entities, []);
+  assert.deepEqual(deriveRoomDevices(home.rooms[1], home.entities, home.entityScopes), [], 'hidden members in another room do not import the group');
 });
 
 test('an assigned group detects hidden members in another area and entity area overrides hidden device area', () => {
@@ -1340,7 +1389,7 @@ test('an assigned group detects hidden members in another area and entity area o
 
 test('visible parent traverses hidden/disabled nested groups but those groups never become rows or suppressors themselves', () => {
   const regs = registry([
-    { entity_id: 'group.outer' },
+    assigned('group.outer'),
     { entity_id: 'group.hidden', hidden_by: 'integration' },
     { entity_id: 'group.disabled', disabled_by: 'user' },
     assigned('light.visible'), assigned('light.hidden', { hidden_by: 'integration' }),
@@ -1359,12 +1408,13 @@ test('visible parent traverses hidden/disabled nested groups but those groups ne
   assert.deepEqual(rows.map((entity) => entity.id), ['group.outer']);
   assert.equal(rows[0].memberCount, 3);
   const withoutParent = home.entities.filter((entity) => entity.id !== 'group.outer');
-  assert.deepEqual(deriveRoomDevices(home.rooms[0], withoutParent, home.entityScopes).map((entity) => entity.id), ['light.visible'], 'topology alone never adds a hidden group or hides its visible member');
+  const withoutParentRoom = { ...home.rooms[0], entities: withoutParent };
+  assert.deepEqual(deriveRoomDevices(withoutParentRoom, withoutParent, home.entityScopes).map((entity) => entity.id), ['light.visible'], 'topology alone never adds a hidden group or hides its visible member');
 });
 
 test('category-filtered members inform shared group scope but never appear as ordinary rows', () => {
   const regs = registry([
-    { entity_id: 'group.sensors' }, assigned('sensor.local', { entity_category: 'diagnostic' }),
+    assigned('group.sensors'), assigned('sensor.local', { entity_category: 'diagnostic' }),
     { entity_id: 'sensor.remote', area_id: 'b', entity_category: 'config' },
   ], [{ area_id: 'a', name: 'A' }, { area_id: 'b', name: 'B' }]);
   const states = {
